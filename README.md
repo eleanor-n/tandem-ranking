@@ -11,9 +11,10 @@ reference adapter, a migration, a backfill script, and an offline simulator.
 
 ```bash
 npm install
-npm test          # 48 tests
+npm test          # 100 tests
 npm run typecheck
 npm run sim -- --users 40 --days 120 --seed 1 --verbose
+npm run sweep -- --sizes 20,40,80,150,300,600 --seeds 1,2,3
 ```
 
 ---
@@ -34,6 +35,17 @@ Implements steps **1, 2, 3, 5** of the v1.5 framework:
 | ⬜ | Learned weights — v2, offline, from `ranking_events` |
 | ⬜ | Server-side ranking — everything is client-side, and stays that way until the pool is too big to fetch whole |
 
+**v1.6 — scale adaptation:**
+
+| | |
+|---|---|
+| ✅ | Per-user density estimate from coverage, EWMA-smoothed with a hysteresis band |
+| ✅ | Every scale-dependent parameter is a `{village, city}` pair on a continuous scalar — one algorithm, no mode switch, enforced by four architectural tests |
+| ✅ | Demand balancing (§2) — urgency, overflow, and the §2.3 claim that fairness rules become free at village scale, verified by test |
+| ✅ | Exhaustion (§3), gated by `repeatAffinity` |
+| ✅ | Density sweep across 20–600 users × 3 seeds, with host churn, exhaustion and supply response in the population model |
+| ⚠️ | **The sweep result is negative.** `proximity_only` beats the adaptive ranker by 24–36% on repeat rate at every size ≥80, and on liquidity too. See [`INFERENCES.md` §G](INFERENCES.md). |
+
 > ⚠️ **The v2 framework document was not available when this was built.** Only
 > `tandem-matching-algorithm-v1.md` was. Everything the build prompt specified
 > directly is built to spec; everything only v2 would have contained was
@@ -49,7 +61,8 @@ Implements steps **1, 2, 3, 5** of the v1.5 framework:
 src/ranking/core/       pure TS — no React, no Expo, no Supabase, no clock
 src/ranking/adapter/    all I/O; supabase.ts is the only Supabase-aware file
 supabase/migrations/    one idempotent migration, with a ROLLBACK block
-scripts/                backfill (dry-run first) + offline simulator
+scripts/                backfill (dry-run first), simulator, density sweep
+                        population.ts is the FROZEN model the sweep grades against
 tests/                  hand-built fixtures, no random generation
 ```
 
@@ -74,6 +87,9 @@ here" survives exactly one distracted afternoon.
 | No numeric score reachable from a UI type | `rank.test.ts` serialises and greps |
 | Reason lines claim only what the data proves | `explain.test.ts` |
 | Nothing imports `@supabase/supabase-js` | `purity.test.ts` |
+| No scoring module imports or mentions the regime | `purity.test.ts`, 4 checks |
+| No parameter jumps anywhere on the density continuum | `regime.test.ts` |
+| P_join renormalises to 1 at every regime | `regime.test.ts` + load-time assert |
 
 The Supabase client is typed **structurally** rather than imported, which is why
 the dependency list is empty and why the same code runs on Hermes in an Expo

@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "sim": "tsx scripts/simulate.ts",
-    "backfill": "tsx scripts/backfill-interest-events.ts"
+    "backfill": "tsx scripts/backfill-interest-events.ts",
+    "sweep": "tsx scripts/sweep.ts"
   },
   "dependencies": {},
   "devDependencies": {

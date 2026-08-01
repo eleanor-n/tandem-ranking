@@ -212,3 +212,218 @@ things in the completion trigger are **guesses**, marked `[CONFIG]` in the file:
 
 Adapter column names are in one `COLUMNS` object at the top of
 `adapter/supabase.ts`. Reconcile both before applying to anything real.
+
+
+---
+---
+
+# v1.6 — Scale adaptation
+
+Added by the v1.6 build. Same rule as above: the framework document was still
+unavailable, so anything only it would have contained is a numbered claim here.
+
+## F. New inferences
+
+### F1. The hysteresis band applies to the regime scalar, not to coverage
+
+§1.2 says the regime "may only move if the smoothed value crosses the current
+regime value by more than 0.15". `0.15` is dimensionless, which fits the regime
+scalar (bounded [0, 1]) and does not fit coverage (unbounded above — 0.15 of a
+coverage of 8 means something different from 0.15 of a coverage of 1.5). I
+implemented it on the scalar.
+
+**Consequence worth knowing:** hysteresis leaves a permanent dead zone. The
+emitted regime can sit up to one band away from what the smoothed coverage
+implies, indefinitely. That is inherent to hysteresis, not a defect, and it is
+bounded — accepted moves snap to the candidate rather than stepping by the band,
+so the error never accumulates. Asserted in `regime.test.ts`.
+
+### F2. `graphAffinity`'s city weight is declared as 0.0, not 0.15
+
+§1.5 gives `w_graphAffinity` as 0.0 → 0.15 and then says "keep at 0 this build".
+Declaring 0.15 and relying on the feature returning zero would be wrong, not
+merely inert: the weight survives renormalisation, so P_join would max out at
+0.85 for every user at city scale. Both ends are 0.0, with a comment saying to
+set city to 0.15 **in the same commit that implements the feature**.
+
+### F3. Retrieval quotas became fractions, and the affinity/proximity split is invented
+
+v1.5 quotas were integers `{affinity 4, proximity 2, fresh_host 1, random 1}`.
+They cannot interpolate continuously as integers, so they are now fractions of
+the deck. §1.5 pins `fresh_host` and `random` at both ends; the remaining mass
+had to be split. Village leans proximity (0.70/0.30) to match its P_join
+weighting; city keeps v1.5's 2:1 affinity:proximity ratio (0.57/0.28).
+**[GUESS]**
+
+### F4. §4.1's "geographic density fixed" is implemented as geographic AREA fixed
+
+Holding users-per-area fixed would grow the map with N, leaving each viewer's
+local pool constant and coverage flat — which would make the sweep measure
+nothing, contradicting the stated purpose ("so coverage rises with N as it would
+in reality"). I hold the metro area fixed at 10x10 miles and let N densify it,
+which is how an app actually grows inside a city.
+
+### F5. `maxPerCategory` / `maxPerHost` are rounded, not floored
+
+They are counts; a cap of 2.4 cards is not a thing. Rounding rather than
+flooring so the midpoint of {8, 2} lands at 5 instead of collapsing early toward
+the city value. This is the one legitimate discontinuity in the system, and the
+continuity test exempts exactly these two parameters and no others.
+
+### F6. The interest cache now carries a parameter fingerprint
+
+Not in the spec, but forced by it. The interest vector depends on
+`noveltyBoost`, which now moves with density, so a vector computed under one
+regime is *wrong* under another rather than merely stale. Without the
+fingerprint a user crossing the hysteresis band would keep serving an interest
+vector built with the old novelty weighting until some unrelated event happened
+to invalidate it.
+
+### F7. `confirmedJoiners` is denormalised onto `activities`
+
+Per the answer to the blocking question in §2.2. A trigger on `join_requests`
+**recounts** rather than increments — an incrementing trigger drifts the first
+time a row is updated twice, deleted, or backfilled, and a drifted demand signal
+is worse than none because it silently boosts posts that are actually full.
+
+`undefined` is treated as UNKNOWN, not as zero, throughout. If unknown read as
+zero, every post whose joiner count failed to load would be boosted as if it
+were desperately empty.
+
+### F8. `repeatAffinity` is currently inert — a known temporary weakness
+
+§3 gates exhaustion on `repeatAffinity`, sourced from the post-tandem check-in.
+**Check-in data does not exist yet.** So in production today every pairing
+returns the neutral 0.5 and exhaustion acts as a *uniform damper on all repeats*
+— including the good ones, which are the north star.
+
+This is a gap waiting on data, not a design choice, and it is the single most
+important thing to fix once check-ins ship. Until then, exhaustion is actively
+working against the metric the system is optimised for. The simulator models
+this faithfully: it has a hidden pairwise compatibility whose only route to the
+ranker is the check-in.
+
+---
+
+## G. The density sweep. The result is negative.
+
+Four arms, frozen population model (committed at `b42810c`, before any arm ran),
+six population sizes, three seeds, 120 simulated days. Full numbers in
+`sweep-results.md` and `sweep-results.csv`.
+
+```
+N     coverage  regime   arm                 repeat  tandems/u  zero-joiner  hosts alive  Gini  relevance
+20      0.51     0.00    regime_adaptive     0.479     3.40        50.2%       28.3%     0.622   0.053
+                         proximity_only      0.526     4.07        53.4%       21.7%     0.574   0.057
+40      0.69     0.00    regime_adaptive     0.562     9.05        32.7%       25.8%     0.712   0.065
+                         proximity_only      0.561     9.59        34.0%       21.7%     0.638   0.073
+80      1.33     0.10    regime_adaptive     0.444     8.71        30.3%       25.0%     0.734   0.071
+                         proximity_only      0.583    12.71        29.1%       29.2%     0.593   0.096
+150     2.38     0.38    regime_adaptive     0.425    11.10        30.4%       24.4%     0.793   0.084
+                         proximity_only      0.648    17.79        22.6%       36.7%     0.565   0.129
+300     3.85     0.65    regime_adaptive     0.424    12.75        40.6%       19.8%     0.876   0.093
+                         proximity_only      0.647    20.08        20.5%       39.3%     0.548   0.153
+600     6.40     0.86    regime_adaptive     0.419    13.24        51.4%       11.6%     0.930   0.098
+                         proximity_only      0.651    20.90        20.4%       42.5%     0.525   0.173
+```
+
+### G1. What matched the prediction
+
+**At N=40, `regime_adaptive` and `proximity_only` are within 0.2% on repeat
+rate** (0.562 vs 0.561). That is the stated success criterion for village scale
+— they are nearly the same algorithm there, and they behave like it. The
+crossover finder puts the sign change at N≈39.
+
+`regime_adaptive` also beats `full_ranker_fixed` on every liquidity metric at
+every size: fewer zero-joiner posts (30.3% vs 36.9% at N=80; 40.6% vs 42.7% at
+N=300), more surviving hosts, lower Gini. The §2 demand machinery does what it
+claims relative to the unadapted ranker.
+
+### G2. What did not
+
+**`proximity_only` beats `regime_adaptive` by 24–36% on the north star at every
+size from 80 upward, and the gap does not close as density rises.** It also wins
+on tandems per user (20.9 vs 13.2 at N=600), zero-joiner rate (20.4% vs 51.4%),
+surviving hosts (42.5% vs 11.6%) and Gini.
+
+That last group is the damaging part. Those are the *village objective's own
+metrics*. The entire justification for demand balancing, the fresh-host slot and
+the impression floor is that they protect liquidity and keep hosts from
+churning. In this simulation a ranker with none of that machinery protects both
+better, because it generates so many more joins that more posts fill and fewer
+hosts give up. **At these densities relevance IS liquidity**, and the fairness
+machinery redistributes a smaller pie.
+
+The second stated expectation — that `regime_adaptive` beats
+`full_ranker_fixed` decisively at N≥300 — is only half met. It wins on liquidity
+but not on repeat rate (0.424 vs 0.464 at N=300; 0.419 vs 0.415 at N=600, i.e.
+a tie). The adaptation is not yet earning its complexity on the north star.
+
+### G3. Decomposing the loss
+
+I ran one diagnostic to find out *where* the gap comes from: the full ranker,
+with all its slate/demand/exhaustion machinery, but with P_join forced to pure
+proximity weights. At N=300, two seeds:
+
+| arm | repeat rate | deck relevance |
+|---|---:|---:|
+| `regime_adaptive`, normal weights | 0.420 | 0.092 |
+| `regime_adaptive`, P_join = pure proximity | 0.522 | 0.112 |
+| `proximity_only` | 0.650 | 0.152 |
+
+So the gap splits roughly **40% weights, 60% machinery**.
+
+- **The weight half is substantially a simulator artefact.** The hidden join
+  model uses only `affinity x distance` (times bond and exhaustion). `timeFit`,
+  `intentMatch` and `socialContext` have *literally zero* predictive power in
+  this world, and they carry ~35% of P_join. Any ranker that uses them is
+  structurally penalised here. In reality they presumably matter; the simulator
+  cannot say.
+- **The machinery half is not.** Even with identical scoring weights, the ranker
+  shows cards the hidden model wants 26% less. Diversity caps, the explore
+  epsilon, the fresh-host slot and the funnel decomposition itself
+  (`P_accept x P_complete x R_repeat`, which `proximity_only` ignores entirely)
+  all displace nearer cards. That cost is real and it is not compensated in this
+  model.
+
+### G4. How much to believe this
+
+**Weight it as strong evidence.** The v1.5 report noted that a simulator
+authored alongside its ranker has correlated blind spots, so results favouring
+the ranker are weak and results against it are strong. This result is against
+the ranker, from a model that was frozen and committed before any arm ran, and
+it reproduces across three seeds and six population sizes with a stable
+magnitude.
+
+The one genuine caveat cuts *toward* the ranker and is quantified above: the
+simulator's user model is strictly simpler than the ranker's feature set, so
+three of eleven features are guaranteed-negative in this world. That accounts
+for about 40% of the gap and no more.
+
+### G5. What I did not do
+
+I did not tune. The spec said that if `regime_adaptive` loses to
+`proximity_only` at N=40 by more than ~3%, report it rather than tuning until it
+passes — it did not lose at N=40, it lost badly everywhere above it, and the
+same instruction applies with more force. The village parameters are not the
+problem; the parameters at moderate-to-high density are.
+
+### G6. What I would do next, in order
+
+1. **Raise the proximity weight across the whole continuum**, not just at
+   village. The city column gives proximity 0.20 on the theory that selection
+   matters more when there is more to select from. This sweep says the opposite
+   at every density it can see. A city column nearer 0.35–0.40 is the single
+   highest-value experiment.
+2. **Price the machinery.** Run each of `maxPerHost`, `exploreEpsilon`,
+   `fresh_host` quota and the demand terms individually against
+   `proximity_only`, at N=300, and keep only the ones that pay for themselves.
+   My prior after G3 is that the fresh-host slot and explore are net-negative at
+   every density in this model, and that demand balancing is roughly neutral.
+3. **Make the simulator reward timeFit and socialContext**, so the weight half
+   of the gap becomes measurable rather than assumed. This changes the frozen
+   model, so both sets of numbers get published — but it should be done as a
+   *pre-registered* change with the expected direction stated first, not after
+   seeing a result.
+4. **Ship check-ins.** Until `repeatAffinity` is real, exhaustion damps good
+   repeats and bad ones equally (F8), and repeat rate is the north star.
