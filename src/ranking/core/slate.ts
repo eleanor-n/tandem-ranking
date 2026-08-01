@@ -17,7 +17,7 @@
 
 import { CONSTANTS } from './constants.js';
 import type { Rng } from './random.js';
-import type { ScoredCandidate } from './types.js';
+import type { ResolvedParams, ScoredCandidate } from './types.js';
 
 export interface SlateResult {
   cards: ScoredCandidate[];
@@ -75,14 +75,15 @@ function applyDiversity(
   scored: readonly ScoredCandidate[],
   deckSize: number,
   relaxations: string[],
+  params: ResolvedParams,
 ): ScoredCandidate[] {
   const ladder = CONSTANTS.slate.relaxationOrder.filter(
     (name): name is 'maxPerHost' | 'maxPerCategory' => name !== 'minFreshHostInTop',
   );
 
   const caps: Caps = {
-    maxPerHost: CONSTANTS.slate.maxPerHost,
-    maxPerCategory: CONSTANTS.slate.maxPerCategory,
+    maxPerHost: params.maxPerHost,
+    maxPerCategory: params.maxPerCategory,
   };
 
   let chosen = greedyPick(scored, deckSize, caps);
@@ -111,7 +112,14 @@ function applyDiversity(
 function ensureFreshHostInTop(
   cards: ScoredCandidate[],
   relaxations: string[],
+  params: ResolvedParams,
 ): ScoredCandidate[] {
+  // At village scale the fresh_host quota is 0 and this guarantee is inert by
+  // design (§2.3): nothing needs displacing when the whole pool gets shown, and
+  // urgency already surfaces an unfilled new host's post. Recording the
+  // relaxation here would be noise, so the guarantee simply does not apply.
+  if (params.quotas.fresh_host <= 0) return cards;
+
   const topWindow = Math.min(CONSTANTS.slate.topSlots, cards.length);
   const alreadyThere = cards
     .slice(0, topWindow)
@@ -157,16 +165,23 @@ function ensureFreshHostInTop(
  * Position 2 (index 1) rather than position 1: the top card carries most of the
  * session's value and should be the model's best guess.
  */
-function applyExploreEpsilon(cards: ScoredCandidate[], rng: Rng): ScoredCandidate[] {
+function applyExploreEpsilon(
+  cards: ScoredCandidate[],
+  rng: Rng,
+  params: ResolvedParams,
+): ScoredCandidate[] {
   const pos = CONSTANTS.slate.exploreSwapPosition;
   if (cards.length <= pos + 1) return cards;
+
+  // At village scale epsilon is 0 and this is a no-op — but the Rng draws still
+  // happen below, so the seeded sequence stays identical either way.
 
   // Draw the epsilon coin unconditionally so that the Rng consumes the same
   // number of values whether or not the swap happens. Otherwise the sequence
   // desynchronises and determinism becomes deck-length-dependent.
   const roll = rng();
   const pick = rng();
-  if (roll >= CONSTANTS.slate.exploreEpsilon) return cards;
+  if (roll >= params.exploreEpsilon) return cards;
 
   const lowerCount = cards.length - (pos + 1);
   const target = pos + 1 + Math.floor(pick * lowerCount);
@@ -183,15 +198,16 @@ function applyExploreEpsilon(cards: ScoredCandidate[], rng: Rng): ScoredCandidat
 export function assembleSlate(
   scored: readonly ScoredCandidate[],
   rng: Rng,
+  params: ResolvedParams,
   deckSize: number = CONSTANTS.slate.deckSize,
 ): SlateResult {
   const relaxations: string[] = [];
   if (scored.length === 0) return { cards: [], relaxations };
 
   const size = Math.min(deckSize, scored.length);
-  let cards = applyDiversity(scored, size, relaxations);
-  cards = ensureFreshHostInTop(cards, relaxations);
-  cards = applyExploreEpsilon(cards, rng);
+  let cards = applyDiversity(scored, size, relaxations, params);
+  cards = ensureFreshHostInTop(cards, relaxations, params);
+  cards = applyExploreEpsilon(cards, rng, params);
 
   return { cards, relaxations };
 }

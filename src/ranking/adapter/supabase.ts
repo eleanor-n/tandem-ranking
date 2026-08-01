@@ -21,12 +21,14 @@ import type {
   ActivityShape,
   Candidate,
   Epoch,
+  ImpressionHistory,
   InterestEvent,
   InterestSource,
   InterestState,
   MetricSlug,
   RankingEventWrite,
   RankingDataPort,
+  StoredRegimeState,
   TimeBucket,
   UserId,
   Viewer,
@@ -78,6 +80,9 @@ export const COLUMNS = {
     autoAcceptTrusted: 'auto_accept_trusted',
     lat: 'lat',
     lng: 'lng',
+    /** Denormalised by trigger in the v1.6 migration — free on the bulk select. */
+    confirmedJoiners: 'confirmed_joiners',
+    targetJoiners: 'target_joiners',
   },
   joinRequests: {
     table: 'join_requests',
@@ -256,6 +261,15 @@ export function createSupabaseRankingPort(
               postedAt: toEpoch(row[a.createdAt]),
               autoAcceptTrusted: bool(row[a.autoAcceptTrusted]),
               impressionCount: num(row['impression_count'], 0),
+              // Denormalised, so this costs nothing beyond the bulk select it
+              // already rides on. Left undefined when the column is absent —
+              // unknown must not read as "empty, boost it" (see demand.ts).
+              ...(typeof row[a.confirmedJoiners] === 'number'
+                ? { confirmedJoiners: num(row[a.confirmedJoiners], 0) }
+                : {}),
+              ...(typeof row[a.targetJoiners] === 'number'
+                ? { targetJoiners: num(row[a.targetJoiners], 1) }
+                : {}),
               host: {
                 hostId: str(row[a.hostId]),
                 acceptCount: num(row['host_accept_count'], 0),
@@ -303,6 +317,7 @@ export function createSupabaseRankingPort(
           computedAt: toEpoch(row['computed_at']),
           eventCount: num(row['event_count'], 0),
           eventsHash: str(row['events_hash']),
+          paramsFingerprint: str(row['params_fingerprint']),
           version: num(row['version'], 1),
         };
       } catch (error) {
@@ -318,6 +333,7 @@ export function createSupabaseRankingPort(
           state: state.metrics,
           event_count: state.eventCount,
           events_hash: state.eventsHash,
+          params_fingerprint: state.paramsFingerprint,
           computed_at: toIso(state.computedAt),
           version: state.version,
         }, { onConflict: 'user_id' });
@@ -376,6 +392,70 @@ export function createSupabaseRankingPort(
         if (error) fail('deleteExplicitStatement', error);
       } catch (error) {
         fail('deleteExplicitStatement', error);
+      }
+    },
+
+    async loadRegimeState(userId: UserId): Promise<StoredRegimeState | null> {
+      try {
+        const { data, error } = await client
+          .from(COLUMNS.interestState.table)
+          .select('coverage_ewma,last_regime,coverage_updated_at')
+          .eq('user_id', userId).maybeSingle();
+        if (error || !data) return null;
+        const row = data as Row;
+        return {
+          coverageEwma: typeof row['coverage_ewma'] === 'number' ? row['coverage_ewma'] : null,
+          lastRegime: typeof row['last_regime'] === 'number' ? row['last_regime'] : null,
+          updatedAt: row['coverage_updated_at'] ? toEpoch(row['coverage_updated_at']) : null,
+        };
+      } catch (error) {
+        fail('loadRegimeState', error);
+        return null;
+      }
+    },
+
+    async saveRegimeState(userId: UserId, state: StoredRegimeState): Promise<void> {
+      try {
+        const { error } = await client.from(COLUMNS.interestState.table).upsert({
+          user_id: userId,
+          coverage_ewma: state.coverageEwma,
+          last_regime: state.lastRegime,
+          coverage_updated_at: state.updatedAt !== null ? toIso(state.updatedAt) : null,
+        }, { onConflict: 'user_id' });
+        if (error) fail('saveRegimeState', error);
+      } catch (error) {
+        fail('saveRegimeState', error);
+      }
+    },
+
+    async countRecentImpressions(
+      userId: UserId, days: number, now: Epoch,
+    ): Promise<ImpressionHistory> {
+      try {
+        const since = toIso(now - days * 86_400_000);
+        const res = await client
+          .from(COLUMNS.rankingEvents.table)
+          .select('created_at')
+          .eq('user_id', userId)
+          .eq('event_type', 'impression')
+          .gte('created_at', since);
+        const rows = ((res as unknown as { data: Row[] | null }).data) ?? [];
+
+        // Weeks of history is derived from the OLDEST impression in the window,
+        // not from the row count — a user with 400 impressions all from
+        // yesterday has one day of history, not twenty weeks of it.
+        let oldest = now;
+        for (const r of rows) {
+          const t = toEpoch(r['created_at']);
+          if (t > 0 && t < oldest) oldest = t;
+        }
+        return {
+          count: rows.length,
+          weeksOfHistory: (now - oldest) / (7 * 86_400_000),
+        };
+      } catch (error) {
+        fail('countRecentImpressions', error);
+        return { count: 0, weeksOfHistory: 0 };
       }
     },
 

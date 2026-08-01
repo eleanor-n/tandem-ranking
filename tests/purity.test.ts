@@ -103,6 +103,62 @@ describe('core is framework-agnostic', () => {
   });
 });
 
+describe('the regime boundary', () => {
+  // v1.6 §1.4. resolveParams() is the LAST place the density scalar exists.
+  // Everything downstream receives plain numbers. If a scoring module could
+  // import the regime module, one of them would eventually reach past the
+  // resolved values for the scalar itself and branch on it — which is exactly
+  // the mode switch this whole design exists to avoid.
+  const SEALED = ['score.ts', 'slate.ts', 'explain.ts', 'retrieval.ts', 'features.ts', 'demand.ts'];
+
+  it('no scoring module imports the regime module', () => {
+    for (const file of SEALED) {
+      const source = readFileSync(join(CORE_DIR, file), 'utf8');
+      expect(
+        /from\s+'\.\/regime\.js'/.test(source),
+        `${file} imports ./regime.js — it must take ResolvedParams instead`,
+      ).toBe(false);
+    }
+  });
+
+  it('no scoring module mentions the regime by name', () => {
+    // Catches the subtler version: threading the scalar through as a number and
+    // branching on it, without importing anything.
+    for (const file of SEALED) {
+      const source = code(readFileSync(join(CORE_DIR, file), 'utf8'));
+      for (const banned of [/\bregime\b/i, /\bvillage\b/i, /\bcity\b/i, /\bcoverage\b/i]) {
+        expect(
+          banned.test(source),
+          `${file} references ${banned} outside a comment — it must not know density exists`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('only rank.ts resolves parameters', () => {
+    // One resolution point per session. Two would mean two sessions could
+    // disagree with themselves mid-deck.
+    const callers = readdirSync(CORE_DIR)
+      .filter((f) => f.endsWith('.ts') && f !== 'regime.ts')
+      .filter((f) => /resolveParams\s*\(/.test(code(readFileSync(join(CORE_DIR, f), 'utf8'))));
+    expect(callers).toEqual(['rank.ts']);
+  });
+
+  it('scale-dependent constants are declared only as scaled pairs', () => {
+    // A fixed value for something the spec says must scale is a regression that
+    // typechecks perfectly.
+    const source = readFileSync(join(CORE_DIR, 'constants.ts'), 'utf8');
+    for (const name of [
+      'exploreEpsilon', 'maxPerCategory', 'maxPerHost',
+      'demandWeight', 'overflowPenalty', 'exhaustionRate',
+    ]) {
+      const bare = new RegExp(`^\\s*${name}:\\s*[\\d.]`, 'm');
+      expect(bare.test(source), `${name} has a fixed value; it must be a {village, city} pair`)
+        .toBe(false);
+    }
+  });
+});
+
 describe('adapter boundary', () => {
   it('only adapter/supabase.ts is coupled to the Supabase client API', () => {
     // index.ts re-exports the factory by name, which is fine. What must not

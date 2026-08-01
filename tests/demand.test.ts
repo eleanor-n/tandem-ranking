@@ -1,0 +1,193 @@
+/**
+ * Demand balancing (§2) and exhaustion (§3).
+ *
+ * The property under test throughout: both terms must vanish as their resolved
+ * parameters go to zero, and both must be monotonic in the thing they claim to
+ * measure. A demand signal that is not monotonic in fill is not a demand signal.
+ */
+
+import { describe, expect, it } from 'vitest';
+import {
+  demandAdjustment,
+  exhaustion,
+  fillRatio,
+  overflow,
+  repeatAffinity,
+  timePressure,
+  urgency,
+} from '../src/ranking/core/demand.js';
+import { resolveParams } from '../src/ranking/core/regime.js';
+import { CONSTANTS } from '../src/ranking/core/constants.js';
+import { DAY, T0, makeCandidate, makeViewer } from './fixtures/index.js';
+
+const village = resolveParams(0);
+const city = resolveParams(1);
+const viewer = makeViewer();
+
+const post = (over: Parameters<typeof makeCandidate>[0]) => makeCandidate(over);
+
+describe('fillRatio', () => {
+  it('defaults capacity to 1 — a tandem is two people', () => {
+    expect(fillRatio(post({ activityId: 'a', confirmedJoiners: 0 }))).toBe(0);
+    expect(fillRatio(post({ activityId: 'a', confirmedJoiners: 1 }))).toBe(1);
+    expect(fillRatio(post({ activityId: 'a', confirmedJoiners: 3 }))).toBe(3);
+  });
+
+  it('honours an explicit capacity', () => {
+    expect(fillRatio(post({
+      activityId: 'a', confirmedJoiners: 2, targetJoiners: 4,
+    }))).toBe(0.5);
+  });
+
+  it('distinguishes unknown from zero', () => {
+    // The important one. If unknown read as zero, every post whose joiner count
+    // failed to load would be boosted as if it were desperately empty.
+    expect(fillRatio(post({ activityId: 'a' }))).toBeNull();
+    expect(urgency(post({ activityId: 'a', startsAt: T0 + DAY }), T0)).toBe(0);
+    expect(overflow(post({ activityId: 'a' }))).toBe(0);
+  });
+});
+
+describe('urgency', () => {
+  it('is maximal for an empty post happening tomorrow', () => {
+    const u = urgency(post({
+      activityId: 'a', confirmedJoiners: 0, startsAt: T0 + DAY,
+    }), T0);
+    expect(u).toBeGreaterThan(0.8);
+  });
+
+  it('is zero for a post that is already full', () => {
+    expect(urgency(post({
+      activityId: 'a', confirmedJoiners: 1, startsAt: T0 + DAY,
+    }), T0)).toBe(0);
+    // And still zero when over-full.
+    expect(urgency(post({
+      activityId: 'a', confirmedJoiners: 5, startsAt: T0 + DAY,
+    }), T0)).toBe(0);
+  });
+
+  it('decays with lead time but never to zero', () => {
+    const near = urgency(post({ activityId: 'a', confirmedJoiners: 0, startsAt: T0 + DAY }), T0);
+    const far = urgency(post({ activityId: 'a', confirmedJoiners: 0, startsAt: T0 + 30 * DAY }), T0);
+    expect(far).toBeLessThan(near);
+    expect(far).toBeCloseTo(CONSTANTS.demand.timePressureFloor, 10);
+  });
+
+  it('is monotonic decreasing in fill', () => {
+    let previous = Infinity;
+    for (const joiners of [0, 1, 2, 3, 4]) {
+      const u = urgency(post({
+        activityId: 'a', confirmedJoiners: joiners, targetJoiners: 4, startsAt: T0 + DAY,
+      }), T0);
+      expect(u).toBeLessThanOrEqual(previous);
+      previous = u;
+    }
+  });
+
+  it('timePressure is clamped at both ends', () => {
+    // A post that already started.
+    expect(timePressure(post({ activityId: 'a', startsAt: T0 - 5 * DAY }), T0)).toBe(1);
+    expect(timePressure(post({ activityId: 'a', startsAt: T0 + 365 * DAY }), T0))
+      .toBe(CONSTANTS.demand.timePressureFloor);
+  });
+});
+
+describe('overflow', () => {
+  it('is zero until the post is actually full', () => {
+    expect(overflow(post({ activityId: 'a', confirmedJoiners: 0 }))).toBe(0);
+    expect(overflow(post({ activityId: 'a', confirmedJoiners: 1 }))).toBe(0);
+    expect(overflow(post({ activityId: 'a', confirmedJoiners: 2 }))).toBe(1);
+  });
+});
+
+describe('exhaustion', () => {
+  it('is zero for a host you have never met', () => {
+    expect(exhaustion(post({ activityId: 'a' }), village)).toBe(0);
+    expect(exhaustion(post({ activityId: 'a', completedTogether: 0 }), village)).toBe(0);
+  });
+
+  it('saturates rather than growing linearly', () => {
+    const p = (n: number) => exhaustion(post({ activityId: 'a', completedTogether: n }), village);
+    const first = p(1) - p(0);
+    const tenth = p(10) - p(9);
+    expect(tenth).toBeLessThan(first);
+    expect(p(100)).toBeLessThan(1);
+  });
+
+  it('bites harder at village scale, where new faces are scarce', () => {
+    const c = post({ activityId: 'a', completedTogether: 3 });
+    expect(exhaustion(c, village)).toBeGreaterThan(exhaustion(c, city));
+  });
+});
+
+describe('repeatAffinity gating', () => {
+  it('vanishes entirely for a host you keep saying yes to', () => {
+    // The load-bearing case. Becoming a habit with someone is the north star,
+    // so exhaustion must not punish the pairings that are working.
+    const loved = post({ activityId: 'a', completedTogether: 5, repeatAffinity: 1 });
+    const adjustment = demandAdjustment(viewer, loved, T0, village);
+    expect(adjustment.exhaustion).toBeGreaterThan(0.5);   // they ARE exhausted
+    expect(adjustment.multiplier).toBe(1);                 // and it costs nothing
+  });
+
+  it('suppresses hardest for a host you said no to', () => {
+    const base = { activityId: 'a', completedTogether: 3 } as const;
+    const said_no = demandAdjustment(viewer, post({ ...base, repeatAffinity: 0 }), T0, village);
+    const unknown = demandAdjustment(viewer, post({ ...base }), T0, village);
+    const said_yes = demandAdjustment(viewer, post({ ...base, repeatAffinity: 1 }), T0, village);
+
+    expect(said_no.multiplier).toBeLessThan(unknown.multiplier);
+    expect(unknown.multiplier).toBeLessThan(said_yes.multiplier);
+  });
+
+  it('defaults to neutral when there is no check-in answer', () => {
+    // Currently the case for EVERY pairing, since check-in data does not exist
+    // yet. Documented as a known temporary weakness, not a design choice.
+    expect(repeatAffinity(post({ activityId: 'a' })))
+      .toBe(CONSTANTS.demand.unknownRepeatAffinity);
+    expect(repeatAffinity(post({ activityId: 'a', repeatAffinity: Number.NaN })))
+      .toBe(CONSTANTS.demand.unknownRepeatAffinity);
+  });
+});
+
+describe('the combined adjustment', () => {
+  it('boosts an empty imminent post far more at village than at city scale', () => {
+    const desperate = post({ activityId: 'a', confirmedJoiners: 0, startsAt: T0 + DAY });
+    const v = demandAdjustment(viewer, desperate, T0, village).multiplier;
+    const c = demandAdjustment(viewer, desperate, T0, city).multiplier;
+    expect(v).toBeGreaterThan(c);
+    expect(v).toBeGreaterThan(1.3);
+  });
+
+  it('is inert when every term is absent', () => {
+    // Village behaviour is the limit of city behaviour, and BOTH are the limit
+    // of "no demand data" — nothing here may fire on missing information.
+    expect(demandAdjustment(viewer, post({ activityId: 'a' }), T0, village).multiplier).toBe(1);
+    expect(demandAdjustment(viewer, post({ activityId: 'a' }), T0, city).multiplier).toBe(1);
+  });
+
+  it('never multiplies a card to zero', () => {
+    // The score orders and never filters. A zeroed card is indistinguishable
+    // from an ineligible one and sorts arbitrarily against its equally-zeroed
+    // peers.
+    const worst = post({
+      activityId: 'a',
+      confirmedJoiners: 99,
+      completedTogether: 500,
+      repeatAffinity: 0,
+      startsAt: T0 + 365 * DAY,
+    });
+    const m = demandAdjustment(viewer, worst, T0, village).multiplier;
+    expect(m).toBeGreaterThan(0);
+    expect(m).toBeGreaterThanOrEqual(CONSTANTS.demand.multiplierFloor);
+  });
+
+  it('reports its components for debugging', () => {
+    const a = demandAdjustment(viewer, post({
+      activityId: 'a', confirmedJoiners: 0, completedTogether: 2, startsAt: T0 + DAY,
+    }), T0, village);
+    expect(a.urgency).toBeGreaterThan(0);
+    expect(a.overflow).toBe(0);
+    expect(a.exhaustion).toBeGreaterThan(0);
+  });
+});

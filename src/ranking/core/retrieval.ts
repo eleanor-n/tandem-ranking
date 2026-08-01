@@ -22,6 +22,7 @@ import type {
   Candidate,
   Epoch,
   InterestState,
+  ResolvedParams,
   RetrievalSource,
   Viewer,
 } from './types.js';
@@ -153,15 +154,21 @@ function randomSource(pool: readonly Candidate[], rng: Rng, limit: number): Cand
  * Scale the per-deck quotas up by the over-fetch factor and the requested deck
  * size, so slate assembly has spare cards to swap in when a constraint bites.
  */
-export function scaledQuotas(deckSize: number): Record<RetrievalSource, number> {
-  const base = CONSTANTS.retrieval.quotas;
+export function scaledQuotas(
+  deckSize: number,
+  params: ResolvedParams,
+): Record<RetrievalSource, number> {
+  const base = params.quotas;
   const baseTotal = (Object.values(base) as number[]).reduce((a, b) => a + b, 0);
   if (baseTotal <= 0) {
-    throw new Error('CONSTANTS.retrieval.quotas must not sum to zero');
+    throw new Error('resolved retrieval quotas must not sum to zero');
   }
   const target = deckSize * CONSTANTS.retrieval.overFetchFactor;
   const out = {} as Record<RetrievalSource, number>;
   for (const source of SOURCE_ORDER) {
+    // Ceil, so a source with a small but non-zero fraction still gets at least
+    // one candidate. A source at exactly 0 gets 0 and is skipped entirely,
+    // which is how village scale switches off explore without a branch.
     out[source] = Math.ceil((base[source] / baseTotal) * target);
   }
   return out;
@@ -188,8 +195,9 @@ export function retrieve(
   rng: Rng,
   now: Epoch,
   deckSize: number,
+  params: ResolvedParams,
 ): RetrievalResult {
-  const quotas = scaledQuotas(deckSize);
+  const quotas = scaledQuotas(deckSize, params);
 
   const raw: Record<RetrievalSource, Candidate[]> = {
     affinity: affinitySource(pool, state, quotas.affinity),

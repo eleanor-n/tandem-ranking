@@ -118,15 +118,16 @@ export const CONSTANTS = {
     noveltyRecencyTauDays: 30,
 
     /**
-     * [new] How much novelty lifts a metric's salience:
+     * How much novelty lifts a metric's salience:
      *   salience = interest * (1 + noveltyBoost * novelty)
-     * This is the anti-homophily dial. Raising it surfaces thin new interests
-     * over well-established ones — the thing that stops the model deciding
-     * someone is "a coffee person" forever. At 2.5, two five-day-old events
-     * outrank forty events smeared over 200 days, which is the spec's stated
-     * intent. Lowering it below ~2.0 inverts that.
+     *
+     * MOVED TO CONSTANTS.scaled.noveltyBoost in v1.6 — it scales 1.0 (village)
+     * to 2.5 (city), because novelty is unmeasurable on three events. This
+     * value remains as the default used when no resolved params are supplied,
+     * and is the city end, so v1.5 behaviour is preserved for callers that do
+     * not pass params.
      */
-    noveltyBoost: 2.5,
+    noveltyBoostDefault: 2.5,
 
     /** [new] How many contributing events to retain per metric for explanations. */
     topContributorsPerMetric: 3,
@@ -237,24 +238,171 @@ export const CONSTANTS = {
   },
 
   // =========================================================================
+  // Density / regime (v1.6 §1)
+  // =========================================================================
+  //
+  // The objective itself changes with density, so the parameters do too. There
+  // is exactly one algorithm; "village" and "city" are the two ends of a
+  // continuum, not two code paths. Village behaviour is the mathematical limit
+  // of city behaviour as regime -> 0.
+  //
+  // Why: at 40 users with ~12 live posts a viewer can enumerate the whole
+  // eligible pool in a week. Ordering barely matters (everything gets shown
+  // anyway), explore quotas spend real slots for zero information (the explore
+  // card would have been seen regardless), and interest() is computed from so
+  // few events that it is mostly variance. The binding constraint at that size
+  // is LIQUIDITY — a host posting, getting nobody, and never posting again.
+  // At scale the binding constraint flips to ATTENTION and the current
+  // greedy-per-viewer ranking is correct.
+  regime: {
+    /**
+     * [new, GUESS] Coverage below which a user is fully "village".
+     * coverage = eligiblePostsPerWeek / cardsViewedPerWeek. Below 1.5 the user
+     * literally cannot exhaust their pool in a week, so ordering is nearly moot.
+     * Raising it keeps users in village mode longer.
+     */
+    coverageLow: 1.5,
+
+    /**
+     * [new, GUESS] Coverage above which a user is fully "city". At 4x the pool
+     * is four times what they will look at, so selection is doing real work.
+     * Raising it delays the transition to city parameters.
+     */
+    coverageHigh: 4.0,
+
+    /** [spec §1.2] EWMA smoothing factor over weekly coverage. */
+    coverageEwmaAlpha: 0.3,
+
+    /**
+     * [spec §1.2] Hysteresis band on the regime scalar. The regime only moves if
+     * the newly-implied value differs from the last emitted one by more than
+     * this. Without it, raw weekly coverage flips regime week to week and the
+     * user experiences the deck inexplicably changing character.
+     * Raising it makes the deck more stable and slower to adapt.
+     */
+    hysteresisBand: 0.15,
+
+    /**
+     * [spec §1.1] Assumed cards viewed per week before there is enough
+     * impression history to measure it. Two weeks of history is the threshold.
+     */
+    defaultCardsViewedPerWeek: 20,
+    minWeeksOfHistory: 2,
+
+    /**
+     * [new] Days of eligible posts that constitute "per week". Coverage is
+     * defined weekly; this is the window both terms are measured over.
+     */
+    coverageWindowDays: 7,
+  },
+
+  /**
+   * Scale-dependent parameters. Each is a { village, city } pair, resolved ONCE
+   * per session by resolveParams() in regime.ts and passed down as plain
+   * numbers. Nothing downstream of resolveParams knows the regime exists —
+   * score.ts, slate.ts and explain.ts do not import the regime module at all,
+   * and tests/purity.test.ts fails the build if they start to.
+   */
+  scaled: {
+    /**
+     * [spec §1.5] P_join weights at each end of the continuum.
+     *
+     * These do NOT each sum to 1 (village sums to 0.85). resolveParams
+     * renormalises after interpolating, which is asserted. Renormalising after
+     * rather than before is deliberate: it keeps each column readable as the
+     * relative importance the spec stated, instead of as pre-divided fractions.
+     */
+    pJoin: {
+      /**
+       * Weights the `categoryAffinity` feature, which is the interest model's
+       * contribution. Low at village because interest() over three events
+       * contributes more variance than signal.
+       */
+      interestAffinity: { village: 0.10, city: 0.30 },
+      /**
+       * The simulator's finding made structural. Pure nearest-first beat the
+       * full ranker on repeat rate at 40 users; this is the response to that,
+       * rather than a global retune that would have been wrong at scale.
+       */
+      proximity: { village: 0.40, city: 0.20 },
+      timeFit: { village: 0.20, city: 0.12 },
+      intentMatch: { village: 0.10, city: 0.15 },
+      socialContext: { village: 0.05, city: 0.08 },
+      /**
+       * STUB, both ends. graphAffinity() returns 0 in this build, so the
+       * intended city value of 0.15 is deliberately NOT declared here: a
+       * non-zero weight on an always-zero feature would survive renormalisation
+       * and systematically depress P_join for everyone. Set city to 0.15 in the
+       * same commit that implements graphAffinity, not before.
+       */
+      graphAffinity: { village: 0.0, city: 0.0 },
+    },
+
+    /**
+     * [spec §1.5] Explore epsilon. Zero at village: exposure is already
+     * guaranteed by pool exhaustion, so an explore swap spends a real slot to
+     * show a card the user would have seen anyway.
+     */
+    exploreEpsilon: { village: 0.0, city: 0.15 },
+
+    /**
+     * [spec §1.5] Retrieval quotas as FRACTIONS of the deck (they were integers
+     * in v1.5). Fractions because the split has to interpolate continuously and
+     * integers cannot.
+     *
+     * fresh_host and random are pinned by the spec at both ends. The remaining
+     * mass is split between affinity and proximity; that split is [new, GUESS]
+     * — village leans proximity to match its P_join weighting, city keeps the
+     * v1.5 2:1 affinity:proximity ratio.
+     */
+    quotas: {
+      affinity: { village: 0.30, city: 0.57 },
+      proximity: { village: 0.70, city: 0.28 },
+      fresh_host: { village: 0.0, city: 0.10 },
+      random: { village: 0.0, city: 0.05 },
+      graph: { village: 0.0, city: 0.0 },
+    },
+
+    /**
+     * [spec §1.5] Slate diversity caps. You cannot diversify a pool that is not
+     * diverse: at village scale, capping categories at 2 in a deck of 8 just
+     * means relaxing the cap every single time, which is noise.
+     */
+    maxPerCategory: { village: 8, city: 2 },
+    maxPerHost: { village: 3, city: 1 },
+
+    /**
+     * [spec §2] Demand-balancing weight. How hard an unfilled, imminent post is
+     * boosted. High at village because filling posts IS the objective there.
+     */
+    demandWeight: { village: 0.50, city: 0.10 },
+
+    /**
+     * [spec §2.2] Overflow penalty. Showing someone an already-full post costs
+     * them a slot and probably a rejection. Expensive at village scale; at city
+     * scale there is another card right behind it.
+     */
+    overflowPenalty: { village: 0.6, city: 0.2 },
+
+    /**
+     * [spec §3] Exhaustion rate. How fast repeat exposure to an already-met host
+     * decays. Higher at village because the pool of people is small and running
+     * out of new faces is the failure mode there.
+     */
+    exhaustionRate: { village: 0.35, city: 0.15 },
+
+    /**
+     * [spec §1.5] Novelty boost (§1.4). Lower at village: novelty is
+     * unmeasurable on three events, and at 1.0 it becomes a mild tiebreak
+     * rather than the dominant term it is at city scale.
+     */
+    noveltyBoost: { village: 1.0, city: 2.5 },
+  },
+
+  // =========================================================================
   // Scoring weights (framework §4, v1 hand weights)
   // =========================================================================
   score: {
-    /** [v1] P_join = weighted sum. Must sum to 1.0; asserted at module load. */
-    pJoin: {
-      categoryAffinity: 0.35,
-      intentMatch: 0.20,
-      proximity: 0.20,
-      timeFit: 0.15,
-      socialContext: 0.10,
-      /**
-       * [new] STUB. graphAffinity is always 0 in v1.5, so this weight is inert.
-       * When the graph is switched on, take this from categoryAffinity and
-       * proximity rather than adding it on top, or P_join drifts above 1.
-       */
-      graphAffinity: 0.0,
-    },
-
     /** [v1] P_complete = 0.7*completionPrior + 0.3*freshness. */
     pComplete: {
       completionPrior: 0.7,
@@ -279,22 +427,10 @@ export const CONSTANTS = {
   // =========================================================================
   retrieval: {
     /**
-     * [new] Candidates each source contributes to a deck of `slate.deckSize`.
-     * Quotas are targets, not caps on the pool: an under-filling source hands
-     * its slots to the sources in `backfillOrder`. Sources are drained in this
-     * declaration order, so earlier sources win ties on dedup.
-     *
-     * Raising `random` trades relevance for marketplace health — correct at 40
-     * users, wrong at 40,000.
+     * Quotas moved to CONSTANTS.scaled.quotas in v1.6 — they are fractions of
+     * the deck now, and they interpolate with density. Sources are still drained
+     * in SOURCE_ORDER, so earlier sources win ties on dedup.
      */
-    quotas: {
-      affinity: 4,
-      proximity: 2,
-      fresh_host: 1,
-      random: 1,
-      /** STUB: the graph source returns [] in v1.5, so this quota is redistributed. */
-      graph: 0,
-    } satisfies Record<RetrievalSource, number>,
 
     /** [new] Sources that absorb slots left unfilled by others, in order. */
     backfillOrder: ['affinity', 'proximity', 'random'] as RetrievalSource[],
@@ -323,17 +459,57 @@ export const CONSTANTS = {
   },
 
   // =========================================================================
+  // Demand balancing and exhaustion (v1.6 §2, §3)
+  // =========================================================================
+  demand: {
+    /**
+     * [spec §2.1] targetJoiners when a post does not declare one. A tandem is
+     * two people, so one joiner fills it and the overflow penalty starts biting
+     * on the second — which is probably the right product behaviour anyway.
+     */
+    defaultTargetJoiners: 1,
+
+    /**
+     * [spec §2.1] Days out at which timePressure reaches its floor.
+     * timePressure = clamp(1 - daysUntilStart / horizon, floor, 1).
+     * Raising it makes distant posts compete with imminent ones for the boost.
+     */
+    timePressureHorizonDays: 7,
+
+    /**
+     * [spec §2.1] Floor on timePressure. Non-zero so a post a month out with no
+     * joiners still gets some help — just not much.
+     */
+    timePressureFloor: 0.2,
+
+    /**
+     * [spec §3] repeatAffinity when there is no check-in answer for a pairing.
+     * Neutral by construction. NOTE: check-in data does not exist yet, so this
+     * is currently the value for EVERY pairing, which makes exhaustion a uniform
+     * damper rather than a discriminating one. Known temporary weakness.
+     */
+    unknownRepeatAffinity: 0.5,
+
+    /**
+     * [new] Floor on the combined demand multiplier. The score orders and never
+     * filters, so no card may be multiplied to exactly zero — a zeroed card is
+     * indistinguishable from an ineligible one and sorts arbitrarily against its
+     * equally-zeroed peers.
+     */
+    multiplierFloor: 0.01,
+  },
+
+  // =========================================================================
   // Slate assembly (framework §3.3)
   // =========================================================================
   slate: {
     /** [new] Cards per deck. */
     deckSize: 8,
 
-    /** [spec] At most this many cards of the same category per deck. */
-    maxPerCategory: 2,
-
-    /** [new] At most this many cards from the same host per deck. */
-    maxPerHost: 1,
+    /**
+     * maxPerCategory and maxPerHost moved to CONSTANTS.scaled in v1.6: you
+     * cannot diversify a pool that is not diverse.
+     */
 
     /** [spec] At least this many fresh_host cards must appear within topSlots. */
     minFreshHostInTop: 1,
@@ -341,12 +517,11 @@ export const CONSTANTS = {
     topSlots: 3,
 
     /**
-     * [v1 §5] Explore epsilon: with this probability, swap position 2 with a
-     * uniformly random lower-ranked card. Seeded, so it is deterministic per
-     * (user, session). At 40 users this arguably wants to be higher; at scale
-     * it comes down.
+     * exploreEpsilon moved to CONSTANTS.scaled in v1.6. It is 0 at village
+     * scale: exposure is already guaranteed by pool exhaustion, so the swap
+     * would spend a slot showing a card the user was going to see anyway.
      */
-    exploreEpsilon: 0.15,
+
     /** [v1 §5] Zero-based position that the epsilon swap targets. */
     exploreSwapPosition: 1,
 
@@ -510,9 +685,28 @@ export const ADJACENT_BUCKET_CREDIT = 0.5;
 // retunes a weight and forgets the others have to move too.
 // ---------------------------------------------------------------------------
 
-const pJoinSum = (Object.values(CONSTANTS.score.pJoin) as number[]).reduce((a, b) => a + b, 0);
-if (Math.abs(pJoinSum - 1) > 1e-9) {
-  throw new Error(`CONSTANTS.score.pJoin must sum to 1, got ${pJoinSum}`);
+// P_join weights are renormalised to 1 after interpolation (see regime.ts), so
+// the columns themselves need not sum to 1 — but each end must carry positive
+// mass, or resolveParams would divide by zero at that extreme.
+for (const end of ['village', 'city'] as const) {
+  const sum = Object.values(CONSTANTS.scaled.pJoin)
+    .reduce((acc, pair) => acc + pair[end], 0);
+  if (!(sum > 0)) {
+    throw new Error(`CONSTANTS.scaled.pJoin.${end} must carry positive weight, got ${sum}`);
+  }
+}
+
+// Retrieval quotas are fractions of the deck and must each end sum to 1.
+for (const end of ['village', 'city'] as const) {
+  const sum = Object.values(CONSTANTS.scaled.quotas)
+    .reduce((acc, pair) => acc + pair[end], 0);
+  if (Math.abs(sum - 1) > 1e-9) {
+    throw new Error(`CONSTANTS.scaled.quotas.${end} must sum to 1, got ${sum}`);
+  }
+}
+
+if (CONSTANTS.regime.coverageHigh <= CONSTANTS.regime.coverageLow) {
+  throw new Error('CONSTANTS.regime.coverageHigh must exceed coverageLow');
 }
 
 const pCompleteSum = (Object.values(CONSTANTS.score.pComplete) as number[]).reduce((a, b) => a + b, 0);

@@ -21,6 +21,7 @@ import { proximityOrder, scoreCandidates } from './score.js';
 import { retrieve } from './retrieval.js';
 import { selectReason } from './explain.js';
 import { mulberry32, seedFor } from './random.js';
+import { computeRegime, resolveParams } from './regime.js';
 import { CONSTANTS } from './constants.js';
 import type {
   ActivityId,
@@ -28,6 +29,7 @@ import type {
   RankInput,
   RankOptions,
   RankResult,
+  ResolvedParams,
   RetrievalSource,
   SlateCard,
 } from './types.js';
@@ -56,19 +58,39 @@ export function rank(
   try {
     const rng = mulberry32(seed);
 
+    // THE ONLY PLACE THE REGIME EXISTS.
+    //
+    // Resolved once per session, then passed down as plain numbers. Nothing
+    // below this line can tell village from city, which is what stops the
+    // adaptation degenerating into two code paths. If `regime` was not supplied
+    // the reading is derived from the pool itself, so a first-ever session with
+    // no stored coverage history still lands somewhere sensible rather than
+    // defaulting to an arbitrary end of the scale.
+    const regime = input.regime ?? computeRegime(
+      {
+        eligiblePostsPerWeek: input.candidates.length,
+        cardsViewedPerWeek: null,
+        weeksOfHistory: 0,
+      },
+      null,
+    ).regime;
+
+    const params = resolveParams(regime);
+
     const interest = computeInterestState(
       input.interestEvents, input.now, input.viewer.userId,
+      { noveltyBoost: params.noveltyBoost },
     );
 
     const retrieved = retrieve(
-      input.viewer, input.candidates, interest, rng, input.now, deckSize,
+      input.viewer, input.candidates, interest, rng, input.now, deckSize, params,
     );
 
     const scored = scoreCandidates(
-      input.viewer, retrieved.candidates, interest, input.now,
+      input.viewer, retrieved.candidates, interest, input.now, params,
     );
 
-    const { cards, relaxations } = assembleSlate(scored, rng, deckSize);
+    const { cards, relaxations } = assembleSlate(scored, rng, params, deckSize);
 
     const slateCards: SlateCard[] = cards.map((sc, position) => ({
       activityId: sc.candidate.activityId,
@@ -97,6 +119,8 @@ export function rank(
         retrieval: retrieved.bySource as Record<RetrievalSource, ActivityId[]>,
         relaxations,
         seed,
+        regime,
+        params,
       };
     }
 

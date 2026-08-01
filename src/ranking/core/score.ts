@@ -14,12 +14,14 @@
 
 import { CONSTANTS } from './constants.js';
 import { computeFeatures } from './features.js';
+import { NEUTRAL_DEMAND, demandAdjustment, type DemandAdjustment } from './demand.js';
 import type {
   Candidate,
   Epoch,
   FeatureVector,
   FunnelScore,
   InterestState,
+  ResolvedParams,
   ScoredCandidate,
   Viewer,
 } from './types.js';
@@ -31,10 +33,10 @@ import type {
  * at module load in constants.ts), so this is genuinely in [0, 1] and reads as
  * a probability rather than an arbitrary index.
  */
-export function pJoin(f: FeatureVector): number {
-  const w = CONSTANTS.score.pJoin;
+export function pJoin(f: FeatureVector, params: ResolvedParams): number {
+  const w = params.pJoin;
   return (
-    w.categoryAffinity * f.categoryAffinity +
+    w.interestAffinity * f.categoryAffinity +
     w.intentMatch * f.intentMatch +
     w.proximity * f.proximity +
     w.timeFit * f.timeFit +
@@ -90,19 +92,25 @@ export function exposureBoost(candidate: Candidate, peerMedianImpressions: numbe
 /** S for one candidate, given its features. */
 export function scoreFeatures(
   f: FeatureVector,
+  params: ResolvedParams,
   boost: number = 1,
+  demand: DemandAdjustment = NEUTRAL_DEMAND,
 ): FunnelScore {
-  const j = pJoin(f);
+  const j = pJoin(f, params);
   const a = pAccept(f);
   const c = pComplete(f);
   const r = rRepeat(f);
+  const base = j * a * c * r * boost;
   return {
     pJoin: j,
     pAccept: a,
     pComplete: c,
     rRepeat: r,
     exposureBoost: boost,
-    score: j * a * c * r * boost,
+    urgency: demand.urgency,
+    overflow: demand.overflow,
+    exhaustion: demand.exhaustion,
+    score: base * demand.multiplier,
   };
 }
 
@@ -124,12 +132,18 @@ export function scoreCandidates(
   candidates: readonly Candidate[],
   state: InterestState,
   now: Epoch,
+  params: ResolvedParams,
 ): ScoredCandidate[] {
   const peerMedian = peerMedianImpressions(candidates);
 
   const scored = candidates.map((candidate) => {
     const features = computeFeatures(viewer, candidate, state, now);
-    const funnel = scoreFeatures(features, exposureBoost(candidate, peerMedian));
+    const funnel = scoreFeatures(
+      features,
+      params,
+      exposureBoost(candidate, peerMedian),
+      demandAdjustment(viewer, candidate, now, params),
+    );
     return { candidate, features, funnel };
   });
 

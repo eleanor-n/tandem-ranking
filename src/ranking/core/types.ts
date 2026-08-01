@@ -129,6 +129,12 @@ export interface InterestState {
   eventCount: number;
   /** Order-independent fingerprint of the folded event ids. */
   eventsHash: string;
+  /**
+   * Fingerprint of the density-scaled parameters the fold used. The vector
+   * depends on noveltyBoost, which moves with density, so a cache computed
+   * under one regime must not be served under another.
+   */
+  paramsFingerprint: string;
   version: number;
 }
 
@@ -198,6 +204,30 @@ export interface Candidate {
   autoAcceptTrusted: boolean;
   /** How many impressions this post has had, for the impression floor. */
   impressionCount: number;
+
+  /**
+   * Accepted joiners so far (§2.1). Denormalised onto `activities` and
+   * maintained by a trigger, so the existing bulk query picks it up for free —
+   * this must never become a per-card fetch.
+   *
+   * `undefined` means UNKNOWN, which is not the same as 0. An unknown count
+   * contributes no urgency at all, so a post whose data failed to load cannot
+   * be boosted as if it were empty.
+   */
+  confirmedJoiners?: number;
+
+  /** Capacity. Defaults to 1: a tandem is two people. */
+  targetJoiners?: number;
+
+  /** Completed tandems between this viewer and this host, for exhaustion (§3). */
+  completedTogether?: number;
+
+  /**
+   * Does this viewer want more of this host? From the post-tandem check-in:
+   * yes -> high, no -> low, unknown -> undefined (treated as neutral 0.5).
+   * The only signal that separates repeat-seeking from variety-seeking.
+   */
+  repeatAffinity?: number;
   /** Which retrieval source surfaced it. Assigned during retrieval. */
   retrievalSource?: RetrievalSource;
 }
@@ -216,6 +246,52 @@ export interface Viewer {
   seenHostIds: UserId[];
   /** Viewers the host trusts — drives auto-accept. */
   trustedByHostIds: UserId[];
+}
+
+// ---------------------------------------------------------------------------
+// Density-scaled parameters (v1.6 §1.4)
+// ---------------------------------------------------------------------------
+
+/** A parameter declared at both ends of the density continuum. */
+export interface Scaled<T> {
+  village: T;
+  city: T;
+}
+
+/**
+ * The flat parameter object every scoring module consumes.
+ *
+ * These types live HERE rather than in regime.ts on purpose. score.ts, slate.ts,
+ * retrieval.ts and explain.ts need the shape but must not import the regime
+ * module — if they could, one of them would eventually reach past the resolved
+ * values for the regime scalar itself and branch on it. Everything below is a
+ * plain number, so a module holding one of these cannot recover the density it
+ * came from even if someone tries. tests/purity.test.ts enforces the import ban.
+ */
+export interface ResolvedParams {
+  /** P_join weights, renormalised to sum exactly 1 at every point. */
+  pJoin: {
+    /** Weights the categoryAffinity feature — the interest model's contribution. */
+    interestAffinity: number;
+    proximity: number;
+    timeFit: number;
+    intentMatch: number;
+    socialContext: number;
+    graphAffinity: number;
+  };
+  /** Retrieval quotas as fractions of the deck, summing to 1. */
+  quotas: Record<RetrievalSource, number>;
+  exploreEpsilon: number;
+  maxPerCategory: number;
+  maxPerHost: number;
+  /** delta in S x (1 + delta * urgency) — demand balancing (§2). */
+  demandWeight: number;
+  /** sigma in S x (1 - sigma * overflow) — already-full penalty (§2.2). */
+  overflowPenalty: number;
+  /** Rate in exhaustion = 1 - exp(-rate * completedTogether) (§3). */
+  exhaustionRate: number;
+  /** beta in salience = interest x (1 + beta * novelty) (§1.4). */
+  noveltyBoost: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,10 +321,16 @@ export interface FunnelScore {
   pAccept: number;
   pComplete: number;
   rRepeat: number;
-  /** pJoin * pAccept * pComplete * rRepeat, then exposure adjustments. */
+  /** pJoin * pAccept * pComplete * rRepeat, then exposure and demand adjustments. */
   score: number;
   /** Multiplier applied by the impression floor, 1.0 if it did not fire. */
   exposureBoost: number;
+  /** How badly this post needs a joiner, in [0, 1] (§2.1). */
+  urgency: number;
+  /** How over-subscribed it already is, in [0, 1] (§2.2). */
+  overflow: number;
+  /** How worn out this viewer/host pairing is, in [0, 1] (§3). */
+  exhaustion: number;
 }
 
 export interface ScoredCandidate {
@@ -319,6 +401,10 @@ export interface SlateDebug {
   /** Constraints that had to be relaxed to keep the deck full. */
   relaxations: string[];
   seed: number;
+  /** The density scalar in force: 0 fully village, 1 fully city. */
+  regime: number;
+  /** Every scale-dependent parameter, after interpolation. */
+  params: ResolvedParams;
 }
 
 export interface RankResult {
@@ -341,6 +427,13 @@ export interface RankInput {
   interestEvents: InterestEvent[];
   sessionId: SessionId;
   now: Epoch;
+  /**
+   * Density scalar in [0, 1], normally computed by the adapter from stored
+   * coverage history. When omitted, rank() derives a one-shot reading from the
+   * candidate pool size — correct for a first-ever session, and for the
+   * simulator, which has no persistence.
+   */
+  regime?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +454,20 @@ export interface RankingDataPort {
   loadInterestStateCache(userId: UserId): Promise<InterestState | null>;
   saveInterestStateCache(state: InterestState): Promise<void>;
 
+  /**
+   * Coverage/regime persistence (v1.6 §1.2). Smoothing and hysteresis need
+   * somewhere to live between sessions; without this the regime is recomputed
+   * from scratch every time, which defeats the point of smoothing it.
+   *
+   * Losing this is a degradation, not a correctness failure — the regime
+   * re-derives from the live pool, it just moves more abruptly for a while.
+   */
+  loadRegimeState(userId: UserId): Promise<StoredRegimeState | null>;
+  saveRegimeState(userId: UserId, state: StoredRegimeState): Promise<void>;
+
+  /** Impressions in the last `days`, for the cardsViewedPerWeek term. */
+  countRecentImpressions(userId: UserId, days: number, now: Epoch): Promise<ImpressionHistory>;
+
   /** Append one interest event. */
   appendInterestEvent(
     event: Omit<InterestEvent, 'id'> & { id?: string },
@@ -372,6 +479,20 @@ export interface RankingDataPort {
 
   /** Funnel instrumentation. */
   logRankingEvent(event: RankingEventWrite): Promise<void>;
+}
+
+/** What the adapter persists between sessions for the density estimate. */
+export interface StoredRegimeState {
+  coverageEwma: number | null;
+  lastRegime: number | null;
+  updatedAt: Epoch | null;
+}
+
+export interface ImpressionHistory {
+  /** Impressions counted in the window. */
+  count: number;
+  /** How many weeks of history actually exist, which gates using the count. */
+  weeksOfHistory: number;
 }
 
 export type RankingEventType =

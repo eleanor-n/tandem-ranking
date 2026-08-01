@@ -28,6 +28,18 @@ import type {
 
 const MS_PER_DAY = 86_400_000;
 
+/**
+ * Density-dependent inputs to the fold.
+ *
+ * `noveltyBoost` moves with density (1.0 village, 2.5 city) because novelty is
+ * unmeasurable on three events. It is passed in rather than read from CONSTANTS
+ * so that interest.ts stays unaware the regime exists — and so that a cached
+ * vector can be invalidated when it changes, which isCacheFresh handles.
+ */
+export interface InterestOptions {
+  noveltyBoost?: number;
+}
+
 // ---------------------------------------------------------------------------
 // The three primitives
 // ---------------------------------------------------------------------------
@@ -98,8 +110,12 @@ export function noveltyTerm(
  * coffee" using interest, while retrieval uses salience and still surfaces the
  * hiking thing you tried twice last week.
  */
-export function salienceOf(interest: Unit, novelty: Unit): number {
-  return interest * (1 + CONSTANTS.interest.noveltyBoost * novelty);
+export function salienceOf(
+  interest: Unit,
+  novelty: Unit,
+  noveltyBoost: number = CONSTANTS.interest.noveltyBoostDefault,
+): number {
+  return interest * (1 + noveltyBoost * novelty);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +146,9 @@ export function computeInterestState(
   events: readonly InterestEvent[],
   now: Epoch,
   userId?: UserId,
+  options: InterestOptions = {},
 ): InterestState {
+  const noveltyBoost = options.noveltyBoost ?? CONSTANTS.interest.noveltyBoostDefault;
   const acc = new Map<MetricSlug, {
     pos: number;
     neg: number;
@@ -207,7 +225,7 @@ export function computeInterestState(
       interest,
       novelty,
       confidence: sat(entry.count),
-      salience: salienceOf(interest, novelty),
+      salience: salienceOf(interest, novelty, noveltyBoost),
       eventCount: entry.count,
       lastEventAt: entry.lastEventAt,
       topContributors: entry.contributions.slice(
@@ -222,6 +240,7 @@ export function computeInterestState(
     computedAt: now,
     eventCount: events.length,
     eventsHash: hashIdSet(events.map((e) => e.id)),
+    paramsFingerprint: `nb:${noveltyBoost.toFixed(4)}`,
     version: CONSTANTS.interest.stateVersion,
   };
 }
@@ -238,8 +257,9 @@ export function rebuildInterestStateFromEvents(
   events: readonly InterestEvent[],
   now: Epoch,
   userId?: UserId,
+  options: InterestOptions = {},
 ): InterestState {
-  return computeInterestState(events, now, userId);
+  return computeInterestState(events, now, userId, options);
 }
 
 /**
@@ -253,9 +273,17 @@ export function isCacheFresh(
   cached: InterestState | null,
   liveEventIds: readonly string[],
   now: Epoch,
+  paramsFingerprint?: string,
 ): boolean {
   if (!cached) return false;
   if (cached.version !== CONSTANTS.interest.stateVersion) return false;
+  // A vector computed under a different noveltyBoost is wrong, not stale-ish.
+  // Without this check a user crossing the hysteresis band keeps serving an
+  // interest vector built with the old novelty weighting until some unrelated
+  // event happens to invalidate it.
+  if (paramsFingerprint !== undefined && cached.paramsFingerprint !== paramsFingerprint) {
+    return false;
+  }
   if (cached.eventCount !== liveEventIds.length) return false;
   if (cached.eventsHash !== hashIdSet(liveEventIds)) return false;
   const ageMinutes = (now - cached.computedAt) / 60_000;

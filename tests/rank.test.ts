@@ -23,6 +23,18 @@ const history: InterestEvent[] = [
   ...spreadEvents('fitness', 'join_requested', 3, 15, 'f'),
 ];
 
+/**
+ * v1.6: these tests pin `regime` explicitly.
+ *
+ * The 12-post standardPool() genuinely reads as village density (coverage 0.6),
+ * and at village scale there is no explore epsilon, no category cap and no
+ * fresh-host slot — by design, because the viewer will see the whole pool
+ * anyway. Tests of city-scale behaviour therefore have to say so, rather than
+ * relying on the old fixed constants.
+ */
+const CITY = { regime: 1 } as const;
+const VILLAGE = { regime: 0 } as const;
+
 describe('determinism', () => {
   it('same seed, same deck, ten runs — byte-identical', () => {
     const input = {
@@ -31,6 +43,7 @@ describe('determinism', () => {
       interestEvents: history,
       sessionId: 'sess-1',
       now: T0,
+      ...CITY,
     };
 
     const first = JSON.stringify(rank(input).slate.cards);
@@ -45,6 +58,7 @@ describe('determinism', () => {
       candidates: standardPool(),
       interestEvents: history,
       now: T0,
+      ...CITY,
     };
     // Not a guarantee that any two sessions differ — epsilon is 15%, so most
     // pairs are identical. Over many sessions at least one must diverge, or the
@@ -65,6 +79,7 @@ describe('determinism', () => {
       interestEvents: history,
       sessionId: 'stable',
       now: T0,
+      ...CITY,
     };
     const a = rank(input).slate.cards.map((c) => c.activityId);
     const b = rank(input).slate.cards.map((c) => c.activityId);
@@ -100,13 +115,14 @@ describe('the score orders, never filters', () => {
 });
 
 describe('slate constraints', () => {
-  it('no more than 2 same-category cards in a deck of 8', () => {
+  it('no more than 2 same-category cards in a deck of 8, at city scale', () => {
     const result = rank({
       viewer: makeViewer(),
       candidates: standardPool(),
       interestEvents: history,
       sessionId: 'sess-1',
       now: T0,
+      ...CITY,
     });
 
     const counts = new Map<string, number>();
@@ -114,11 +130,11 @@ describe('slate constraints', () => {
       counts.set(card.category, (counts.get(card.category) ?? 0) + 1);
     }
     for (const [, n] of counts) {
-      expect(n).toBeLessThanOrEqual(CONSTANTS.slate.maxPerCategory);
+      expect(n).toBeLessThanOrEqual(CONSTANTS.scaled.maxPerCategory.city);
     }
   });
 
-  it('at least one fresh_host card appears in the top 3', () => {
+  it('at least one fresh_host card appears in the top 3, at city scale', () => {
     const result = rank(
       {
         viewer: makeViewer(),
@@ -126,6 +142,7 @@ describe('slate constraints', () => {
         interestEvents: history,
         sessionId: 'sess-1',
         now: T0,
+        ...CITY,
       },
       { debug: true },
     );
@@ -156,6 +173,7 @@ describe('slate constraints', () => {
         interestEvents: history,
         sessionId: 'sess-1',
         now: T0,
+        ...CITY,
       },
       { debug: true },
     );
@@ -268,6 +286,7 @@ describe('graph is a stub', () => {
         interestEvents: history,
         sessionId: 'sess-1',
         now: T0,
+        ...CITY,
       },
       { debug: true },
     );
@@ -296,5 +315,119 @@ describe('time is injected', () => {
 
     expect(lateFresh).toBeLessThanOrEqual(earlyFresh);
     expect(lateFresh).toBeGreaterThanOrEqual(CONSTANTS.features.freshnessFloor);
+  });
+});
+
+describe('village scale (v1.6 §2.3)', () => {
+  it('spends no slots on explore or fresh-host quotas', () => {
+    const result = rank(
+      {
+        viewer: makeViewer(),
+        candidates: standardPool(),
+        interestEvents: history,
+        sessionId: 'sess-1',
+        now: T0,
+        ...VILLAGE,
+      },
+      { debug: true },
+    );
+
+    expect(result.debug!.params.exploreEpsilon).toBe(0);
+    expect(result.debug!.retrieval.random).toEqual([]);
+    expect(result.debug!.retrieval.fresh_host).toEqual([]);
+  });
+
+  it("a new host's first post reaches the top 3 with NO fresh-host slot", () => {
+    // The §2.3 claim: at village scale the fairness rules stop being
+    // displacement rules and become ordering rules. Nothing is displaced when
+    // the whole pool gets shown anyway — a brand-new host's post has
+    // fillRatio 0, so urgency surfaces it without a reserved slot.
+    const pool = standardPool().map((c) =>
+      c.hostId === 'host_g'
+        // Brand-new host, nobody signed up, happening in two days, and
+        // deliberately the FURTHEST card in the pool so proximity cannot be
+        // what rescues it.
+        ? { ...c, confirmedJoiners: 0, startsAt: T0 + 2 * DAY }
+        // Everyone else is already full, so overflow damps them.
+        : { ...c, confirmedJoiners: 2 },
+    );
+
+    const result = rank(
+      {
+        viewer: makeViewer(),
+        candidates: pool,
+        interestEvents: history,
+        sessionId: 'sess-1',
+        now: T0,
+        ...VILLAGE,
+      },
+      { debug: true },
+    );
+
+    const top3 = result.slate.cards.slice(0, 3).map((c) => c.hostId);
+    expect(top3).toContain('host_g');
+    // And it got there without the fresh-host machinery firing at all.
+    expect(result.debug!.params.quotas.fresh_host).toBe(0);
+    expect(result.debug!.retrieval.fresh_host).toEqual([]);
+  });
+
+  it('does not cap categories when the pool has no diversity to spend', () => {
+    const result = rank(
+      {
+        viewer: makeViewer(),
+        candidates: standardPool(),
+        interestEvents: history,
+        sessionId: 'sess-1',
+        now: T0,
+        ...VILLAGE,
+      },
+      { debug: true },
+    );
+    expect(result.debug!.params.maxPerCategory).toBe(8);
+    // No relaxation is recorded, because nothing was constrained in the first
+    // place. Relaxations should mean "we wanted to and could not", not "n/a".
+    expect(result.debug!.relaxations).toEqual([]);
+  });
+});
+
+describe('regime is derived when not supplied', () => {
+  it('a small pool reads as village without being told', () => {
+    const result = rank(
+      {
+        viewer: makeViewer(),
+        candidates: standardPool(),
+        interestEvents: history,
+        sessionId: 'sess-1',
+        now: T0,
+      },
+      { debug: true },
+    );
+    // 12 eligible posts against the default 20 cards/week is coverage 0.6.
+    expect(result.debug!.regime).toBe(0);
+  });
+
+  it('a large pool reads as city without being told', () => {
+    const big = Array.from({ length: 120 }, (_, i) =>
+      makeCandidate({
+        activityId: `b${String(i).padStart(3, '0')}`,
+        hostId: `bh${i % 30}`,
+        category: ['coffee', 'fitness', 'hiking', 'markets'][i % 4] as string,
+        distanceMiles: 0.5 + (i % 12) * 0.4,
+        host: makeHost({ hostId: `bh${i % 30}` }),
+      }),
+    );
+
+    const result = rank(
+      {
+        viewer: makeViewer(),
+        candidates: big,
+        interestEvents: history,
+        sessionId: 'sess-1',
+        now: T0,
+      },
+      { debug: true },
+    );
+    expect(result.debug!.regime).toBe(1);
+    expect(result.debug!.params.maxPerCategory).toBe(2);
   });
 });
