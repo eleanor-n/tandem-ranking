@@ -17,10 +17,12 @@
  * available when this was written.
  */
 
+import { CONSTANTS } from '../core/constants.js';
 import type {
   ActivityShape,
   Candidate,
   Epoch,
+  GivenFeedback,
   ImpressionHistory,
   InterestEvent,
   InterestSource,
@@ -29,6 +31,7 @@ import type {
   RankingEventWrite,
   RankingDataPort,
   StoredRegimeState,
+  TandemRecord,
   TimeBucket,
   UserId,
   Viewer,
@@ -89,6 +92,34 @@ export const COLUMNS = {
     activityId: 'activity_id',
     userId: 'user_id',
     status: 'status',
+    createdAt: 'created_at',
+  },
+  /**
+   * The realised PAIRINGS, not the posts. `tandems.status` is the completion
+   * signal for the entire system (SCHEMA.md §1) — `activities.status` was the
+   * v1.6 guess and it was wrong.
+   *
+   * Strictly pairwise. A group tandem, when it arrives, is a clique of these
+   * rows sharing `tandem_group_id`.
+   */
+  tandems: {
+    table: 'tandems',
+    id: 'id',
+    userA: 'user_a_id',
+    userB: 'user_b_id',
+    status: 'status',
+    /** [S1] Verified by PRECHECK P3. Absent -> the interest mirror no-ops. */
+    activityId: 'activity_id',
+    groupId: 'tandem_group_id',
+    createdAt: 'created_at',
+  },
+  /** Already per-pair. Needed no migration; the check-in writes it as-is. */
+  tandemFeedback: {
+    table: 'tandem_feedback',
+    tandemId: 'tandem_id',
+    raterId: 'rater_id',
+    ratedId: 'rated_id',
+    response: 'response',
     createdAt: 'created_at',
   },
   interestEvents: { table: 'interest_events' },
@@ -497,5 +528,135 @@ export function createSupabaseRankingPort(
         fail('logRankingEvents', error);
       }
     },
+
+    // -----------------------------------------------------------------------
+    // Check-in data path (v1.7 §2.2)
+    // -----------------------------------------------------------------------
+
+    async loadCompletedTandems(userId: UserId): Promise<TandemRecord[]> {
+      const t = COLUMNS.tandems;
+      const a = COLUMNS.activities;
+
+      try {
+        // Two queries rather than a join: `tandems.activity_id` is unverified
+        // ([S1]), and a join on a column that may not exist fails the whole
+        // read. Fetched separately, a missing link degrades the CATEGORY and
+        // END TIME to undefined — which checkin.ts already handles — instead of
+        // costing the user their check-in entirely.
+        const mine = async (column: string) => {
+          const res = await client
+            .from(t.table).select('*').eq(column, userId).eq(t.status, 'completed');
+          return ((res as unknown as { data: Row[] | null }).data) ?? [];
+        };
+
+        const rows = [...await mine(t.userA), ...await mine(t.userB)];
+        if (rows.length === 0) return [];
+
+        const activityIds = Array.from(new Set(
+          rows.map((r) => str(r[t.activityId])).filter(Boolean),
+        ));
+
+        const activities = new Map<string, Row>();
+        if (activityIds.length > 0) {
+          try {
+            const res = await client
+              .from(a.table).select('*').in(a.id, activityIds);
+            for (const row of ((res as unknown as { data: Row[] | null }).data) ?? []) {
+              activities.set(str(row[a.id]), row);
+            }
+          } catch (error) {
+            // The link is a nice-to-have. Losing it costs the interest mirror,
+            // not the check-in.
+            fail('loadCompletedTandems.activities', error);
+          }
+        }
+
+        const seen = new Set<string>();
+        const out: TandemRecord[] = [];
+
+        for (const row of rows) {
+          const id = str(row[t.id]);
+          if (!id || seen.has(id)) continue;      // a self-tandem would appear twice
+          seen.add(id);
+
+          const activityId = str(row[t.activityId]);
+          const activity = activityId ? activities.get(activityId) : undefined;
+          const endedAt = activity ? activityEndEpoch(activity) : undefined;
+
+          out.push({
+            tandemId: id,
+            userAId: str(row[t.userA]),
+            userBId: str(row[t.userB]),
+            status: str(row[t.status]),
+            ...(activityId ? { activityId } : {}),
+            ...(activity ? { category: str(activity[a.category]) } : {}),
+            ...(endedAt !== undefined ? { endedAt } : {}),
+            createdAt: toEpoch(row[t.createdAt]),
+          });
+        }
+
+        return out;
+      } catch (error) {
+        fail('loadCompletedTandems', error);
+        return [];
+      }
+    },
+
+    async loadGivenFeedback(userId: UserId): Promise<GivenFeedback[]> {
+      const f = COLUMNS.tandemFeedback;
+      try {
+        const res = await client
+          .from(f.table)
+          .select(`${f.tandemId},${f.ratedId}`)
+          .eq(f.raterId, userId);
+        const rows = ((res as unknown as { data: Row[] | null }).data) ?? [];
+        return rows.map((row) => ({
+          tandemId: str(row[f.tandemId]),
+          ratedId: str(row[f.ratedId]),
+        }));
+      } catch (error) {
+        // Degrading to "nothing answered yet" would re-ask everyone. Degrading
+        // to "everything answered" would ask nobody. The second is the quieter
+        // failure and the one a user forgives, so the caller sees an empty list
+        // only alongside an error, and getPendingCheckIns bails on it.
+        fail('loadGivenFeedback', error);
+        throw error;
+      }
+    },
+
+    async writeCheckIn(answer): Promise<void> {
+      const f = COLUMNS.tandemFeedback;
+      const values = CONSTANTS.checkin.responseValues;   // [S4] see SCHEMA.md §5
+      try {
+        const { error } = await client.from(f.table).insert({
+          [f.tandemId]: answer.tandemId,
+          [f.raterId]: answer.raterId,
+          [f.ratedId]: answer.ratedId,
+          [f.response]: answer.positive ? values.positive : values.negative,
+          [f.createdAt]: toIso(answer.createdAt),
+        });
+        if (error) fail('writeCheckIn', error);
+      } catch (error) {
+        fail('writeCheckIn', error);
+      }
+    },
   };
+}
+
+/**
+ * When an activity ended.
+ *
+ * [S3] `activities` may have no end column at all — PRECHECK P5 settles it. The
+ * fallback is start plus an assumed duration, and it is only ever used to
+ * decide WHEN to ask, so being wrong delays or advances a prompt and cannot
+ * corrupt an answer.
+ */
+function activityEndEpoch(row: Row): Epoch | undefined {
+  for (const column of ['ends_at', 'end_time']) {
+    const value = row[column];
+    if (value) return toEpoch(value);
+  }
+  const startsAt = toEpoch(row[COLUMNS.activities.startsAt]);
+  if (startsAt === 0) return undefined;
+  return startsAt + CONSTANTS.checkin.assumedDurationHours * 3_600_000;
 }

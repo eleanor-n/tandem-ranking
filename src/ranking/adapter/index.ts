@@ -19,6 +19,7 @@
 import { rank } from '../core/rank.js';
 import { buildExplicitStatement, computeInterestState, isCacheFresh, rebuildInterestStateFromEvents } from '../core/interest.js';
 import { computeRegime, paramsFingerprint, resolveParams } from '../core/regime.js';
+import { checkInsToPrompt, pendingCheckIns } from '../core/checkin.js';
 import { CONSTANTS } from '../core/constants.js';
 import { createInstrumentation } from './instrumentation.js';
 import type {
@@ -34,6 +35,7 @@ import type {
   InterestSource,
   InterestState,
   MetricSlug,
+  PendingCheckIn,
   RankOptions,
   RankResult,
   RankingDataPort,
@@ -123,6 +125,39 @@ export interface RankingClient {
     metric: MetricSlug;
     source: InterestSource;
     polarity?: 1 | -1;
+    activityId?: ActivityId;
+  }): Promise<void>;
+
+  /**
+   * What this user owes a check-in on, in the order to ask (v1.7 §2.2).
+   *
+   * DATA PATH ONLY. Copy and UI belong to Eleanor; nothing here renders
+   * anything, and the answer is never shown to the rated user or turned into a
+   * score.
+   *
+   * Already metered to `CONSTANTS.checkin.maxPromptsPerAppOpen` — call it once
+   * per app open and ask what comes back. Pass `{ all: true }` for the full
+   * backlog, which is for a debug screen and not for a person.
+   */
+  getPendingCheckIns(userId: UserId, opts?: { all?: boolean }): Promise<PendingCheckIn[]>;
+
+  /**
+   * Record an answer. Writes `tandem_feedback` and mirrors into
+   * `interest_events` so the check-in feeds the interest model, which is where
+   * the highest-weighted source in the whole table lives.
+   *
+   * There is no `skipCheckIn`. A skip writes NOTHING, so it comes back next
+   * time — a person who did not answer is not a person who said no, and storing
+   * a skip as a negative teaches people that the honest answer has
+   * consequences.
+   */
+  submitCheckIn(answer: {
+    tandemId: string;
+    raterId: UserId;
+    ratedId: UserId;
+    positive: boolean;
+    /** From the pending record. Absent -> the interest mirror is skipped. */
+    category?: MetricSlug;
     activityId?: ActivityId;
   }): Promise<void>;
 
@@ -277,6 +312,63 @@ export function createRankingClient(config: RankingClientConfig): RankingClient 
       });
     },
 
+    async getPendingCheckIns(userId, opts = {}) {
+      try {
+        const [tandems, given] = await Promise.all([
+          port.loadCompletedTandems(userId),
+          port.loadGivenFeedback(userId),
+        ]);
+        const pending = pendingCheckIns(userId, tandems, given, now());
+        return opts.all ? pending : checkInsToPrompt(pending);
+      } catch (error) {
+        // Ask nobody rather than risk re-asking everybody. A check-in the user
+        // already answered, asked again, reads as the app not listening — which
+        // is worse than one delayed by a session.
+        config.onError?.('getPendingCheckIns', error);
+        return [];
+      }
+    },
+
+    async submitCheckIn({ tandemId, raterId, ratedId, positive, category, activityId }) {
+      const t = now();
+
+      await port.writeCheckIn({ tandemId, raterId, ratedId, positive, createdAt: t });
+
+      // Mirror into the interest log. This is the point of the check-in as far
+      // as ranking is concerned: checkin_yes carries weight 1.2 at a 120-day
+      // half-life, the highest and longest in INTEREST_SOURCES.
+      //
+      // Skipped when the tandem could not be linked to an activity ([S1]).
+      // Guessing a category would be worse than recording nothing — a wrong
+      // metric is evidence the user never gave, and the interest log is
+      // append-only.
+      if (!category) return;
+
+      const source = positive
+        ? CONSTANTS.checkin.interestSource.positive
+        : CONSTANTS.checkin.interestSource.negative;
+
+      await port.appendInterestEvent({
+        id: newId(),
+        userId: raterId,
+        metric: category,
+        source: source as InterestSource,
+        polarity: positive ? 1 : -1,
+        weight: 1,
+        createdAt: t,
+        ...(activityId ? { activityId } : {}),
+      });
+
+      // And onto the funnel, so check-in rate is measurable alongside
+      // everything else rather than requiring its own query.
+      instrumentation.record({
+        userId: raterId,
+        eventType: positive ? 'checkin_yes' : 'checkin_no',
+        ...(activityId ? { activityId } : {}),
+        hostId: ratedId,
+      });
+    },
+
     instrumentation,
   };
 }
@@ -316,6 +408,7 @@ export {
 } from '../core/regime.js';
 export { createSupabaseRankingPort } from './supabase.js';
 export { createInstrumentation } from './instrumentation.js';
+export { askableFrom, checkInsToPrompt, pendingCheckIns } from '../core/checkin.js';
 export { RANKER_ENABLED } from '../core/shipping.js';
 export type {
   Instrumentation,

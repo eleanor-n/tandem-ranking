@@ -558,6 +558,38 @@ export interface RankingDataPort {
    * a logging failure to a user.
    */
   logRankingEvents(events: readonly RankingEventWrite[]): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Check-in data path (v1.7 §2.2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Completed pairings this user was part of. Reads `tandems`, whose `status`
+   * is the completion signal for the whole system — NOT `activities.status`,
+   * and NOT `tandem_completions` (2 rows against 23 completed tandems; see
+   * SCHEMA.md §1).
+   */
+  loadCompletedTandems(userId: UserId): Promise<TandemRecord[]>;
+
+  /** Feedback this user has already given, so nobody is asked twice. */
+  loadGivenFeedback(userId: UserId): Promise<GivenFeedback[]>;
+
+  /**
+   * Record one check-in answer. Writes `tandem_feedback` — which is already
+   * per-pair (`tandem_id`, `rater_id`, `rated_id`, `response`) and needed no
+   * migration at all.
+   */
+  writeCheckIn(answer: CheckInAnswer): Promise<void>;
+}
+
+/** One check-in answer, on its way to `tandem_feedback`. */
+export interface CheckInAnswer {
+  tandemId: string;
+  raterId: UserId;
+  ratedId: UserId;
+  /** Would you tandem with them again? */
+  positive: boolean;
+  createdAt: Epoch;
 }
 
 // ---------------------------------------------------------------------------

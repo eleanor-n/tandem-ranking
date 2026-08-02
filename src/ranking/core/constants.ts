@@ -574,6 +574,75 @@ export const CONSTANTS = {
   },
 
   // =========================================================================
+  // Post-tandem check-in (v1.7 §2.2)
+  // =========================================================================
+  //
+  // "Would you tandem with them again?" — the single most predictive signal in
+  // the system, and the ONLY route the ranker has to pairwise compatibility.
+  // Exhaustion (§3) is gated on it, which is why exhaustion is switched off
+  // until it exists (see scaled.exhaustionRate).
+  //
+  // This module owns the DATA PATH only. Copy and UI belong to Eleanor.
+  //
+  // Two rules that are product decisions, not implementation details:
+  //   * never shown to the rated user, and never rendered as a score
+  //   * skippable, and a skip is NOT a negative — someone who did not answer is
+  //     not someone who said no, and conflating them teaches people that the
+  //     honest answer has consequences
+  checkin: {
+    /**
+     * [spec §2.2] Minimum elapsed time after the activity ends before asking.
+     * Asking on the walk home reads as surveillance and gets an answer about
+     * the last five minutes rather than the tandem.
+     */
+    minElapsedHours: 2,
+
+    /**
+     * [UNMEASURED] Assumed activity length when `activities` has no end time
+     * ([S3] in SCHEMA.md). Only used to decide WHEN to ask, so being wrong
+     * costs a delayed or early prompt, never a wrong answer. Set it from real
+     * data once there is any.
+     */
+    assumedDurationHours: 2,
+
+    /**
+     * [spec §2.2] At most one prompt per app open. A queue of five check-ins on
+     * launch is an interrogation, and the second answer is already worse than
+     * the first.
+     */
+    maxPromptsPerAppOpen: 1,
+
+    /**
+     * The wire names for the `interest_events` mirror.
+     *
+     * NAMING CONFLICT, surfaced rather than resolved silently — see SCHEMA.md §6.
+     * The build prompt says `checkin_positive` / `checkin_negative`; this repo
+     * has used `checkin_yes` / `checkin_no` since v1.5, and those slugs are
+     * load-bearing in three places, one of which is the INTEREST_SOURCES weight
+     * table. Writing the other names would produce rows matching no source
+     * entry, so they would fold in at ZERO weight — the most predictive signal
+     * in the model, silently contributing nothing.
+     *
+     * Every write routes through this map, so renaming is one edit here plus a
+     * widened check constraint, and the weights come along.
+     */
+    interestSource: {
+      positive: 'checkin_yes',
+      negative: 'checkin_no',
+    },
+
+    /**
+     * [S4 in SCHEMA.md] What goes in `tandem_feedback.response`. The column's
+     * type could not be verified from the repo; PRECHECK P6 settles it, and if
+     * it is text rather than boolean this is the one edit.
+     */
+    responseValues: {
+      positive: true,
+      negative: false,
+    },
+  },
+
+  // =========================================================================
   // The ship gate (v1.7 §3.3)
   // =========================================================================
   shipping: {
