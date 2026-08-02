@@ -83,9 +83,21 @@ export const COLUMNS = {
     autoAcceptTrusted: 'auto_accept_trusted',
     lat: 'lat',
     lng: 'lng',
-    /** Denormalised by trigger in the v1.6 migration — free on the bulk select. */
+    /**
+     * Denormalised by trigger, recounted rather than incremented — free on the
+     * bulk select the deck already runs. This must never become a per-card
+     * fetch: a ranking signal costing a round-trip per card is a ranking signal
+     * that gets deleted the first time someone profiles Discover.
+     */
     confirmedJoiners: 'confirmed_joiners',
-    targetJoiners: 'target_joiners',
+    /**
+     * Capacity. `max_participants` ALREADY EXISTS and already means "joiners
+     * wanted, excluding the host" — 59 of 63 rows are 1. v1.6 added a
+     * `target_joiners` column in ignorance of it; v1.7 drops that column.
+     * Two columns for one fact is a data-integrity bug waiting for the first
+     * row where they disagree. See SCHEMA.md §1.
+     */
+    targetJoiners: 'max_participants',
   },
   joinRequests: {
     table: 'join_requests',
