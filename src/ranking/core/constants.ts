@@ -406,11 +406,37 @@ export const CONSTANTS = {
     overflowPenalty: { village: 0.6, city: 0.2 },
 
     /**
-     * [spec §3] Exhaustion rate. How fast repeat exposure to an already-met host
-     * decays. Higher at village because the pool of people is small and running
-     * out of new faces is the failure mode there.
+     * [spec §3] Exhaustion rate — DISABLED IN v1.7. Both ends are zero.
+     *
+     * REACTIVATION CONDITION: check-in data exists in `tandem_feedback`.
+     * Nothing else. When it does, set these back to
+     * `exhaustionRateWhenReactivated` below and re-run the sweep.
+     *
+     * Why it is off. §3 gates exhaustion on `repeatAffinity`, which comes from
+     * the post-tandem check-in — and there are zero rows of it. So
+     * `repeatAffinity` returns the neutral 0.5 for EVERY pairing, and
+     *
+     *   (1 - exhaustion x (1 - 0.5))
+     *
+     * damps every repeat by the same amount regardless of whether it was a good
+     * one. Repeat-tandem rate is the long-run north star, so a term that
+     * suppresses good repeats and bad repeats identically is not a neutral
+     * placeholder — it is actively working against the metric it exists to
+     * serve.
+     *
+     * The code and its tests stay. This is a data gap, not a design retraction:
+     * §3's claim is that exhaustion needs a compatibility signal to be useful,
+     * and switching it off until that signal exists is that claim taken
+     * seriously rather than argued with.
      */
-    exhaustionRate: { village: 0.35, city: 0.15 },
+    exhaustionRate: { village: 0.0, city: 0.0 },
+
+    /**
+     * The v1.6 values, parked rather than deleted, so reactivation is a
+     * one-line swap and the tuned numbers do not have to be rediscovered.
+     * Nothing reads this.
+     */
+    exhaustionRateWhenReactivated: { village: 0.35, city: 0.15 },
 
     /**
      * [spec §1.5] Novelty boost (§1.4). Lower at village: novelty is
