@@ -182,9 +182,12 @@ export function computeRegime(
  * pre-divided fractions. Renormalising here means the invariant holds at every
  * point on the continuum, not just at the two ends.
  *
- * maxPerCategory and maxPerHost are rounded: they are counts, and a cap of 2.4
- * cards is not a thing. Rounding rather than flooring so the midpoint of
- * {8, 2} lands at 5 rather than collapsing early toward the city value.
+ * As of v1.7 EVERY resolved parameter is continuous. The v1.6 caps
+ * (maxPerCategory, maxPerHost) were integer counts and had to be rounded, which
+ * made them the one legitimate discontinuity in the system and forced the
+ * continuity test to carry an exemption list. Replacing them with
+ * multiplicative session penalties removed the last step function here, so the
+ * exemption list is now empty.
  */
 export function resolveParams(regime: number): ResolvedParams {
   const t = clamp01(regime);
@@ -230,8 +233,8 @@ export function resolveParams(regime: number): ResolvedParams {
     pJoin,
     quotas,
     exploreEpsilon: resolve(s.exploreEpsilon, t),
-    maxPerCategory: Math.round(resolve(s.maxPerCategory, t)),
-    maxPerHost: Math.round(resolve(s.maxPerHost, t)),
+    categoryPenalty: resolve(s.categoryPenalty, t),
+    hostPenalty: resolve(s.hostPenalty, t),
     demandWeight: resolve(s.demandWeight, t),
     overflowPenalty: resolve(s.overflowPenalty, t),
     exhaustionRate: resolve(s.exhaustionRate, t),

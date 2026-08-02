@@ -149,7 +149,7 @@ describe('the regime boundary', () => {
     // typechecks perfectly.
     const source = readFileSync(join(CORE_DIR, 'constants.ts'), 'utf8');
     for (const name of [
-      'exploreEpsilon', 'maxPerCategory', 'maxPerHost',
+      'exploreEpsilon', 'categoryPenalty', 'hostPenalty',
       'demandWeight', 'overflowPenalty', 'exhaustionRate',
     ]) {
       const bare = new RegExp(`^\\s*${name}:\\s*[\\d.]`, 'm');

@@ -364,12 +364,33 @@ export const CONSTANTS = {
     },
 
     /**
-     * [spec §1.5] Slate diversity caps. You cannot diversify a pool that is not
-     * diverse: at village scale, capping categories at 2 in a deck of 8 just
-     * means relaxing the cap every single time, which is noise.
+     * [v1.7 §3.2, UNMEASURED] Within-session diversity penalties, which REPLACE
+     * the v1.6 slot caps entirely.
+     *
+     *   S_final x= categoryPenalty ^ shownThisSession(category)
+     *   S_final x= hostPenalty     ^ shownThisSession(host)
+     *
+     * The caps were mis-specified, not mistuned. Every one of them was a
+     * fraction of a deck of 8 — but Discover shows ONE CARD AT A TIME and the
+     * pool does not reset, so "max 2 per category in 8" never binds in a
+     * three-card session and means nothing at all in a forty-card one. A quota
+     * is a claim about a fixed-size window and there is no window.
+     *
+     * Weaker at village, because there is less to diversify INTO: penalising
+     * the second coffee when coffee is most of what exists just demotes the
+     * whole pool uniformly, which is a no-op with extra steps.
+     *
+     * ---------------------------------------------------------------------
+     * BOTH VALUES ARE UNMEASURED. DO NOT TUNE THEM AGAINST feed_impressions.
+     *
+     * Nobody knows the median session length. `feed_impressions` is empty, and
+     * "3 cards" is a number derived from looking at the UI, not from measuring
+     * anyone. These get set from real `ranking_events` data after the beta —
+     * which is the entire reason this build exists. Tuning them now against a
+     * guess would launder that guess into a measurement.
      */
-    maxPerCategory: { village: 8, city: 2 },
-    maxPerHost: { village: 3, city: 1 },
+    categoryPenalty: { village: 0.95, city: 0.80 },
+    hostPenalty: { village: 0.85, city: 0.60 },
 
     /**
      * [spec §2] Demand-balancing weight. How hard an unfilled, imminent post is
@@ -503,13 +524,30 @@ export const CONSTANTS = {
   // Slate assembly (framework §3.3)
   // =========================================================================
   slate: {
-    /** [new] Cards per deck. */
+    /**
+     * [new] Cards per deck.
+     *
+     * v1.7 note: this is a FETCH size, not a window. Discover shows one card at
+     * a time and keeps going, so the deck is "the next few", not "the session".
+     * Nothing may be expressed as a fraction of it — see scaled.categoryPenalty
+     * for what that mistake cost.
+     */
     deckSize: 8,
 
     /**
-     * maxPerCategory and maxPerHost moved to CONSTANTS.scaled in v1.6: you
-     * cannot diversify a pool that is not diverse.
+     * maxPerCategory / maxPerHost are GONE as of v1.7. They were reserved-slot
+     * rules in a product with no slots. Replaced by the within-session
+     * multiplicative penalties in CONSTANTS.scaled.
      */
+
+    /**
+     * [new] How many sessions' shown-counters the client keeps in memory.
+     *
+     * A session ends when the app backgrounds and nothing tells the ranking
+     * client about it, so these are evicted oldest-first rather than expired.
+     * Enough for any real navigation pattern, and it cannot grow.
+     */
+    trackedSessions: 8,
 
     /** [spec] At least this many fresh_host cards must appear within topSlots. */
     minFreshHostInTop: 1,
@@ -526,12 +564,15 @@ export const CONSTANTS = {
     exploreSwapPosition: 1,
 
     /**
-     * [new] Order in which constraints are relaxed when they cannot all be met.
-     * The deck must never shrink because the algorithm got opinionated, so a
-     * constraint that would drop a card is abandoned instead. Earlier entries
-     * are given up first.
+     * [new] Constraints that can still be given up, in order.
+     *
+     * v1.7 emptied most of this. The cap relaxation ladder existed because a
+     * hard cap could make the deck come out short; a multiplicative penalty
+     * cannot, since a penalised card is still a card. The fresh-host guarantee
+     * is the only displacement rule left, and it is off while the ranker is
+     * shelved.
      */
-    relaxationOrder: ['maxPerHost', 'maxPerCategory', 'minFreshHostInTop'] as const,
+    relaxationOrder: ['minFreshHostInTop'] as const,
   },
 
   // =========================================================================
@@ -852,6 +893,19 @@ for (const end of ['village', 'city'] as const) {
 
 if (CONSTANTS.regime.coverageHigh <= CONSTANTS.regime.coverageLow) {
   throw new Error('CONSTANTS.regime.coverageHigh must exceed coverageLow');
+}
+
+// Session penalties must be in (0, 1]. A penalty of 0 is a hard cap wearing a
+// multiplier's clothes: it drives the score to exactly zero, which makes the
+// card indistinguishable from an ineligible one and sorts it arbitrarily
+// against its equally-zeroed peers. The score ORDERS and never filters.
+for (const name of ['categoryPenalty', 'hostPenalty'] as const) {
+  for (const end of ['village', 'city'] as const) {
+    const value = CONSTANTS.scaled[name][end];
+    if (!(value > 0 && value <= 1)) {
+      throw new Error(`CONSTANTS.scaled.${name}.${end} must be in (0, 1], got ${value}`);
+    }
+  }
 }
 
 const pCompleteSum = (Object.values(CONSTANTS.score.pComplete) as number[]).reduce((a, b) => a + b, 0);

@@ -6,6 +6,10 @@
  * Time enters the system exclusively as an injected `now: Epoch` parameter.
  */
 
+import type { SessionShown } from './session.js';
+
+export type { SessionShown } from './session.js';
+
 // ---------------------------------------------------------------------------
 // Scalars
 // ---------------------------------------------------------------------------
@@ -282,8 +286,17 @@ export interface ResolvedParams {
   /** Retrieval quotas as fractions of the deck, summing to 1. */
   quotas: Record<RetrievalSource, number>;
   exploreEpsilon: number;
-  maxPerCategory: number;
-  maxPerHost: number;
+  /**
+   * Within-session diversity penalties (v1.7 §3.2), in (0, 1]. These REPLACE
+   * the v1.6 `maxPerCategory` / `maxPerHost` slot caps, which were fractions of
+   * a deck of 8 in a product that shows one card at a time and never resets the
+   * pool — a quota over a window that does not exist.
+   *
+   *   S_final x= categoryPenalty ^ shownThisSession(category)
+   *   S_final x= hostPenalty     ^ shownThisSession(host)
+   */
+  categoryPenalty: number;
+  hostPenalty: number;
   /** delta in S x (1 + delta * urgency) — demand balancing (§2). */
   demandWeight: number;
   /** sigma in S x (1 - sigma * overflow) — already-full penalty (§2.2). */
@@ -502,6 +515,19 @@ export interface RankInput {
    * simulator, which has no persistence.
    */
   regime?: number;
+  /**
+   * What this session has already put in front of the viewer (v1.7 §3.2).
+   *
+   * Discover shows one card at a time and the pool does not reset, so diversity
+   * has to be measured against the SESSION rather than against a deck. Omit it
+   * and every deck behaves as a fresh session — correct for a first fetch, and
+   * for the simulator, which drives one deck per day.
+   *
+   * `SessionShown` is declared in core/session.ts rather than here because it
+   * carries behaviour (the fold and the penalty function) and this file carries
+   * none.
+   */
+  sessionShown?: SessionShown;
 }
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ import { rank } from '../core/rank.js';
 import { buildExplicitStatement, computeInterestState, isCacheFresh, rebuildInterestStateFromEvents } from '../core/interest.js';
 import { computeRegime, paramsFingerprint, resolveParams } from '../core/regime.js';
 import { checkInsToPrompt, pendingCheckIns } from '../core/checkin.js';
+import { EMPTY_SESSION, noteShown } from '../core/session.js';
 import { CONSTANTS } from '../core/constants.js';
 import { createInstrumentation } from './instrumentation.js';
 import type {
@@ -41,6 +42,7 @@ import type {
   RankingDataPort,
   ResolvedParams,
   SessionId,
+  SessionShown,
   UserId,
 } from '../core/types.js';
 
@@ -88,12 +90,25 @@ export interface RegimeDebug {
 }
 
 export interface RankingClient {
-  /** Fetch, rank, and return a deck. Never throws; never returns short. */
+  /**
+   * Fetch, rank, and return a deck. Never throws; never returns short.
+   *
+   * Within-session diversity is handled for you: the client remembers what it
+   * has already returned under this `sessionId` and penalises repeats of those
+   * categories and hosts on the next call. Discover fetching "the next few"
+   * over and over is the expected usage, not a special case.
+   */
   getDeck(
     userId: UserId,
     sessionId: SessionId,
     options?: RankOptions & { candidates?: Candidate[] },
   ): Promise<RankResult>;
+
+  /**
+   * Forget what a session has shown. Call on app foreground, alongside
+   * `instrumentation.startSession()`, if you reuse session ids.
+   */
+  resetSession(sessionId: SessionId): void;
 
   /** The user's interest vector, cache-backed. */
   getInterestState(userId: UserId): Promise<InterestState>;
@@ -178,6 +193,34 @@ export function createRankingClient(config: RankingClientConfig): RankingClient 
   const { port, now } = config;
   const newId = config.newId ?? defaultId;
 
+  /**
+   * What each live session has already shown (v1.7 §3.2).
+   *
+   * Held here rather than asked of the caller: Discover fetches "the next few"
+   * repeatedly within one session, so every call site would otherwise have to
+   * remember to feed the counters back — the kind of contract that holds until
+   * the second screen is built.
+   *
+   * Bounded by eviction rather than by TTL: a session is over when the app
+   * backgrounds, and the client does not get told. Keeping the last few is
+   * enough for any real navigation pattern and cannot grow.
+   */
+  const sessionShown = new Map<SessionId, SessionShown>();
+
+  function rememberShown(sessionId: SessionId, result: RankResult): void {
+    const next = noteShown(
+      sessionShown.get(sessionId) ?? EMPTY_SESSION,
+      result.slate.cards,
+    );
+    sessionShown.set(sessionId, next);
+
+    while (sessionShown.size > CONSTANTS.slate.trackedSessions) {
+      const oldest = sessionShown.keys().next().value;
+      if (oldest === undefined) break;
+      sessionShown.delete(oldest);
+    }
+  }
+
   const instrumentation = createInstrumentation({
     port,
     now,
@@ -258,14 +301,27 @@ export function createRankingClient(config: RankingClientConfig): RankingClient 
       // The density estimate reads the pool we already have in hand.
       const { reading } = await readRegime(userId, candidates.length);
 
-      return rank(
+      const result = rank(
         {
           viewer, candidates, interestEvents: events, sessionId, now: t,
           regime: reading.regime,
+          sessionShown: sessionShown.get(sessionId) ?? EMPTY_SESSION,
         },
         options,
         (reason) => config.onError?.('rank', reason.error),
       );
+
+      // Close the loop here rather than making the app thread it. Discover
+      // fetches the next few cards over and over inside one session, and every
+      // caller would otherwise have to remember to feed the counters back —
+      // which is the kind of thing that works until the second screen is built.
+      rememberShown(sessionId, result);
+
+      return result;
+    },
+
+    resetSession(sessionId) {
+      sessionShown.delete(sessionId);
     },
 
     getInterestState: (userId) => loadState(userId),

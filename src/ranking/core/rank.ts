@@ -23,6 +23,7 @@ import { selectReason } from './explain.js';
 import { mulberry32, seedFor } from './random.js';
 import { computeRegime, resolveParams } from './regime.js';
 import { RANKER_ENABLED, applyShipGate } from './shipping.js';
+import { EMPTY_SESSION } from './session.js';
 import { CONSTANTS } from './constants.js';
 import type {
   ActivityId,
@@ -101,7 +102,9 @@ export function rank(
       input.viewer, retrieved.candidates, interest, input.now, params,
     );
 
-    const { cards, relaxations } = assembleSlate(scored, rng, params, deckSize);
+    const { cards, relaxations } = assembleSlate(
+      scored, rng, params, deckSize, input.sessionShown ?? EMPTY_SESSION,
+    );
 
     const slateCards: SlateCard[] = cards.map((sc, position) => ({
       activityId: sc.candidate.activityId,

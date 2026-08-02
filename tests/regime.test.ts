@@ -145,10 +145,10 @@ describe('resolveParams', () => {
 
     expect(village.exploreEpsilon).toBe(s.exploreEpsilon.village);
     expect(city.exploreEpsilon).toBe(s.exploreEpsilon.city);
-    expect(village.maxPerCategory).toBe(s.maxPerCategory.village);
-    expect(city.maxPerCategory).toBe(s.maxPerCategory.city);
-    expect(village.maxPerHost).toBe(s.maxPerHost.village);
-    expect(city.maxPerHost).toBe(s.maxPerHost.city);
+    expect(village.categoryPenalty).toBe(s.categoryPenalty.village);
+    expect(city.categoryPenalty).toBe(s.categoryPenalty.city);
+    expect(village.hostPenalty).toBe(s.hostPenalty.village);
+    expect(city.hostPenalty).toBe(s.hostPenalty.city);
     expect(village.noveltyBoost).toBe(s.noveltyBoost.village);
     expect(city.noveltyBoost).toBe(s.noveltyBoost.city);
     expect(village.demandWeight).toBe(s.demandWeight.village);
@@ -173,12 +173,16 @@ describe('resolveParams', () => {
     }
   });
 
-  it('is continuous — no parameter jumps anywhere', () => {
+  it('is continuous — no parameter jumps anywhere, with NO exemptions', () => {
     // The whole point of the design. A discontinuity here is a mode switch
     // wearing a coefficient's clothes, and it would be felt by users on one day.
+    //
+    // v1.7 removed the exemption list. v1.6 had to exempt maxPerCategory and
+    // maxPerHost: they were integer counts, so they stepped by 1 and were the
+    // one legitimate discontinuity in the system. Replacing them with
+    // multiplicative session penalties made every resolved parameter continuous,
+    // so this test now covers all of them and lets none through.
     const step = 0.005;
-    // maxPerCategory/maxPerHost are integers and legitimately step by 1.
-    const integerParams = new Set(['maxPerCategory', 'maxPerHost']);
 
     let previous = resolveParams(0);
     for (let r = step; r <= 1.0001; r += step) {
@@ -188,9 +192,8 @@ describe('resolveParams', () => {
         if (typeof value !== 'number') continue;
         const before = (previous as unknown as Record<string, number>)[key] as number;
         const delta = Math.abs(value - before);
-        const limit = integerParams.has(key) ? 1 : 0.05;
         expect(delta, `${key} jumped by ${delta} at regime ${r.toFixed(3)}`)
-          .toBeLessThanOrEqual(limit);
+          .toBeLessThanOrEqual(0.05);
       }
 
       for (const [key, value] of Object.entries(current.pJoin)) {
@@ -228,6 +231,30 @@ describe('resolveParams', () => {
     expect(resolveParams(-3)).toEqual(resolveParams(0));
     expect(resolveParams(9)).toEqual(resolveParams(1));
     expect(resolveParams(Number.NaN)).toEqual(resolveParams(0));
+  });
+
+  it('keeps the session penalties weaker at village than at city', () => {
+    // You cannot diversify a pool that is not diverse. At village scale,
+    // penalising the second coffee when coffee is most of what exists demotes
+    // the whole pool uniformly, which is a no-op with extra steps.
+    const village = resolveParams(0);
+    const city = resolveParams(1);
+
+    expect(village.categoryPenalty).toBeGreaterThan(city.categoryPenalty);
+    expect(village.hostPenalty).toBeGreaterThan(city.hostPenalty);
+  });
+
+  it('never lets a session penalty reach zero', () => {
+    // A penalty of 0 is a hard cap wearing a multiplier's clothes: it drives
+    // the score to exactly zero, and a zeroed card is indistinguishable from an
+    // ineligible one. The score ORDERS and never filters.
+    for (let r = 0; r <= 1.0001; r += 0.01) {
+      const p = resolveParams(r);
+      expect(p.categoryPenalty).toBeGreaterThan(0);
+      expect(p.hostPenalty).toBeGreaterThan(0);
+      expect(p.categoryPenalty).toBeLessThanOrEqual(1);
+      expect(p.hostPenalty).toBeLessThanOrEqual(1);
+    }
   });
 
   it('keeps graphAffinity at zero weight at both ends this build', () => {

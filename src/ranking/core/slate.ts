@@ -1,98 +1,111 @@
 /**
- * Slate assembly — framework §3.3.
+ * Slate assembly — framework §3.3, rewritten for v1.7 §3.2.
  *
- * Takes the scored pool and picks the deck. Three things happen here that pure
- * score-sorting will not do for you:
+ * Takes the scored pool and picks the deck. What happens here that pure
+ * score-sorting will not do:
  *
- *   diversity   at most N of a category, at most one per host, so the deck does
- *               not read as "we have decided you are a coffee person"
+ *   diversity   a decaying penalty on categories and hosts the SESSION has
+ *               already shown, so the deck does not read as "we have decided
+ *               you are a coffee person"
  *   fairness    a fresh host is guaranteed a look in the top slots
  *   explore     a seeded epsilon swap, so the model can be wrong and recover
  *
- * The governing rule: constraints reorder, they never shorten. If a constraint
- * cannot be satisfied without dropping a card, the constraint is abandoned and
- * the relaxation is recorded. An empty or short deck is always a bug, never a
- * strongly-held opinion.
+ * The last two are off while the ranker is shelved (their parameters resolve to
+ * zero); the first is the shipping behaviour.
+ *
+ * ---------------------------------------------------------------------------
+ * What changed in v1.7, and why it was a specification bug rather than a tuning
+ * one
+ *
+ * v1.6 enforced diversity with reserved slots: at most N of a category and M
+ * per host, per deck of 8, with a relaxation ladder for when the pool was too
+ * thin to satisfy them. Every one of those numbers was a fraction of a deck.
+ *
+ * But Discover shows ONE CARD AT A TIME. A user keeps tandeming until they
+ * close the app and the pool does not reset. "At most 2 coffees per 8" never
+ * binds in a three-card session, and in a forty-card session it stops meaning
+ * anything at all — the cap applies to a window that does not exist.
+ *
+ * So the caps are gone, replaced by a multiplicative penalty over what the
+ * session has already shown. That change buys three things:
+ *
+ *   * it works at ANY session length, with no cliff
+ *   * it needs no reserved slot and displaces nothing
+ *   * THE RELAXATION LADDER IS UNNECESSARY. A hard cap could make the deck come
+ *     out short, so v1.6 needed machinery to give caps up one at a time in a
+ *     documented order. A penalised card is still a card, so the deck can never
+ *     be short in the first place. An entire failure mode stopped existing.
+ *
+ * The governing rule is unchanged and now holds structurally rather than by
+ * effort: constraints reorder, they never shorten.
  */
 
 import { CONSTANTS } from './constants.js';
 import type { Rng } from './random.js';
+import { EMPTY_SESSION, noteShown, sessionPenalty, type SessionShown } from './session.js';
 import type { ResolvedParams, ScoredCandidate } from './types.js';
 
 export interface SlateResult {
   cards: ScoredCandidate[];
-  /** Constraints that had to be given up to keep the deck full. */
+  /**
+   * Constraints that had to be given up to keep the deck full.
+   *
+   * Nearly always empty as of v1.7 — only the fresh-host guarantee can still be
+   * relaxed, and only when the pool contains no fresh host at all. That is
+   * information rather than a failure: it means supply has gone stale.
+   */
   relaxations: string[];
 }
 
-/** The diversity caps that can be individually given up. */
-interface Caps {
-  maxPerHost: number | null;
-  maxPerCategory: number | null;
-}
-
-/** One greedy pass: take cards in score order, skipping any that break a cap. */
-function greedyPick(
-  scored: readonly ScoredCandidate[],
-  deckSize: number,
-  caps: Caps,
-): ScoredCandidate[] {
-  const perCategory = new Map<string, number>();
-  const perHost = new Map<string, number>();
-  const chosen: ScoredCandidate[] = [];
-
-  for (const sc of scored) {
-    if (chosen.length >= deckSize) break;
-    const cat = sc.candidate.category;
-    const host = sc.candidate.hostId;
-    const catCount = perCategory.get(cat) ?? 0;
-    const hostCount = perHost.get(host) ?? 0;
-
-    if (caps.maxPerHost !== null && hostCount >= caps.maxPerHost) continue;
-    if (caps.maxPerCategory !== null && catCount >= caps.maxPerCategory) continue;
-
-    chosen.push(sc);
-    perCategory.set(cat, catCount + 1);
-    perHost.set(host, hostCount + 1);
-  }
-
-  return chosen;
-}
-
 /**
- * Diversity, with a relaxation ladder.
+ * Greedy selection under the session penalties.
  *
- * Try to fill the deck with every cap enforced. If the pool is not varied
- * enough — twelve posts from seven hosts cannot fill eight slots at one per
- * host — give up exactly one cap, in the documented order, and try again.
+ * The running counters start from what the SESSION has shown and are then
+ * incremented as the deck is built, so the penalty applies both across cards
+ * within this deck and across decks within this session. Those are the same
+ * thing from the user's side — they are looking at one card after another and
+ * do not know where one fetch ended and the next began — so treating them
+ * differently would be an implementation detail leaking into the product.
  *
- * The ladder matters. The naive version (dump the skipped cards back in) gives
- * up every cap at once, so a pool short on hosts also loses its category limit
- * and the deck comes back as six coffees. Relaxing one at a time keeps the
- * constraints that are still satisfiable.
+ * Ties keep the incoming order, which is already a total order (score, then
+ * activityId), so the deck stays reproducible.
  */
-function applyDiversity(
+function selectDeck(
   scored: readonly ScoredCandidate[],
   deckSize: number,
-  relaxations: string[],
   params: ResolvedParams,
+  shown: SessionShown,
 ): ScoredCandidate[] {
-  const ladder = CONSTANTS.slate.relaxationOrder.filter(
-    (name): name is 'maxPerHost' | 'maxPerCategory' => name !== 'minFreshHostInTop',
-  );
+  const chosen: ScoredCandidate[] = [];
+  const taken = new Set<number>();
+  let running = shown;
 
-  const caps: Caps = {
-    maxPerHost: params.maxPerHost,
-    maxPerCategory: params.maxPerCategory,
-  };
+  while (chosen.length < deckSize && taken.size < scored.length) {
+    let bestIndex = -1;
+    let bestScore = -Infinity;
 
-  let chosen = greedyPick(scored, deckSize, caps);
+    for (let i = 0; i < scored.length; i++) {
+      if (taken.has(i)) continue;
+      const sc = scored[i] as ScoredCandidate;
+      const adjusted = sc.funnel.score * sessionPenalty(
+        running,
+        { category: sc.candidate.category, hostId: sc.candidate.hostId },
+        params.categoryPenalty,
+        params.hostPenalty,
+      );
+      // Strict >, so the first of equal candidates wins and the incoming total
+      // order is preserved.
+      if (adjusted > bestScore) { bestScore = adjusted; bestIndex = i; }
+    }
 
-  for (const name of ladder) {
-    if (chosen.length >= deckSize) break;
-    caps[name] = null;
-    relaxations.push(name);
-    chosen = greedyPick(scored, deckSize, caps);
+    if (bestIndex < 0) break;
+    const picked = scored[bestIndex] as ScoredCandidate;
+    taken.add(bestIndex);
+    chosen.push(picked);
+    running = noteShown(running, [{
+      category: picked.candidate.category,
+      hostId: picked.candidate.hostId,
+    }]);
   }
 
   return chosen;
@@ -101,10 +114,10 @@ function applyDiversity(
 /**
  * Guarantee a fresh host in the top slots.
  *
- * A post from a host the viewer has never seen is promoted into the top window
- * regardless of score — once per deck. It displaces the *lowest-scoring* card
- * in that window rather than the top one, so the cost of the guarantee is paid
- * by position 3, not position 1.
+ * A post from a host the viewer has never been shown is promoted into the top
+ * window regardless of score — once per deck. It displaces the *lowest-scoring*
+ * card in that window rather than the top one, so the cost of the guarantee is
+ * paid by position 3, not position 1.
  *
  * If the deck contains no fresh-host card at all, the guarantee is recorded as
  * relaxed. That is information, not a failure: it means supply has gone stale.
@@ -114,10 +127,10 @@ function ensureFreshHostInTop(
   relaxations: string[],
   params: ResolvedParams,
 ): ScoredCandidate[] {
-  // At village scale the fresh_host quota is 0 and this guarantee is inert by
-  // design (§2.3): nothing needs displacing when the whole pool gets shown, and
-  // urgency already surfaces an unfilled new host's post. Recording the
-  // relaxation here would be noise, so the guarantee simply does not apply.
+  // Inert when the fresh_host quota is 0 — which is village scale by design
+  // (§2.3: nothing needs displacing when the whole pool gets shown, and urgency
+  // already surfaces an unfilled new host's post), and also every deck while
+  // the ranker is shelved. Recording the relaxation here would be noise.
   if (params.quotas.fresh_host <= 0) return cards;
 
   const topWindow = Math.min(CONSTANTS.slate.topSlots, cards.length);
@@ -164,6 +177,10 @@ function ensureFreshHostInTop(
  *
  * Position 2 (index 1) rather than position 1: the top card carries most of the
  * session's value and should be the model's best guess.
+ *
+ * Zero while the ranker is shelved. It is the one piece of this file that a
+ * user could perceive directly, as unexplained randomness, so it is also the
+ * one that most needs data behind it before it ships.
  */
 function applyExploreEpsilon(
   cards: ScoredCandidate[],
@@ -172,9 +189,6 @@ function applyExploreEpsilon(
 ): ScoredCandidate[] {
   const pos = CONSTANTS.slate.exploreSwapPosition;
   if (cards.length <= pos + 1) return cards;
-
-  // At village scale epsilon is 0 and this is a no-op — but the Rng draws still
-  // happen below, so the seeded sequence stays identical either way.
 
   // Draw the epsilon coin unconditionally so that the Rng consumes the same
   // number of values whether or not the swap happens. Otherwise the sequence
@@ -194,18 +208,19 @@ function applyExploreEpsilon(
   return out;
 }
 
-/** Assemble the deck: diversity, then the fresh-host guarantee, then explore. */
+/** Assemble the deck: session penalties, then the fresh-host guarantee, then explore. */
 export function assembleSlate(
   scored: readonly ScoredCandidate[],
   rng: Rng,
   params: ResolvedParams,
   deckSize: number = CONSTANTS.slate.deckSize,
+  shown: SessionShown = EMPTY_SESSION,
 ): SlateResult {
   const relaxations: string[] = [];
   if (scored.length === 0) return { cards: [], relaxations };
 
   const size = Math.min(deckSize, scored.length);
-  let cards = applyDiversity(scored, size, relaxations, params);
+  let cards = selectDeck(scored, size, params, shown);
   cards = ensureFreshHostInTop(cards, relaxations, params);
   cards = applyExploreEpsilon(cards, rng, params);
 
