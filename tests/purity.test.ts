@@ -159,6 +159,73 @@ describe('the regime boundary', () => {
   });
 });
 
+describe('the deprecated impression table stays deprecated', () => {
+  // v1.7 §1.3. Two tables with overlapping jobs is how a training set ends up
+  // split across schemas with no way to join it afterwards. ranking_events won
+  // (it has host_id, and it has data); feed_impressions has a DEPRECATED table
+  // comment, and this is the half of that decision that cannot be ignored.
+  it('nothing in src/ or scripts/ references feed_impressions', () => {
+    const roots = [
+      join(import.meta.dirname, '..', 'src', 'ranking', 'core'),
+      join(import.meta.dirname, '..', 'src', 'ranking', 'adapter'),
+      join(import.meta.dirname, '..', 'scripts'),
+    ];
+    for (const dir of roots) {
+      for (const f of readdirSync(dir).filter((x) => x.endsWith('.ts'))) {
+        // code() strips comments and string literals, so explaining WHY the
+        // table is deprecated is fine; naming it in a query is not.
+        const source = code(readFileSync(join(dir, f), 'utf8'));
+        expect(
+          /feed_impressions/.test(source),
+          `${f} references feed_impressions — it is deprecated; write ranking_events`,
+        ).toBe(false);
+      }
+    }
+  });
+});
+
+describe('the ship gate', () => {
+  // v1.7 §3.3. One flag, read in one place. The gate is a parameter
+  // transformation rather than a branch (see core/shipping.ts), which is what
+  // stops the shelved ranker rotting into code that no longer works when the
+  // flag flips.
+  it('only rank.ts reads the ranker flag', () => {
+    const readers = readdirSync(CORE_DIR)
+      .filter((f) => f.endsWith('.ts') && f !== 'shipping.ts')
+      .filter((f) => /RANKER_ENABLED|applyShipGate/.test(
+        code(readFileSync(join(CORE_DIR, f), 'utf8')),
+      ));
+    expect(readers).toEqual(['rank.ts']);
+  });
+
+  it('no scoring module imports the shipping module', () => {
+    // Same rule as the regime boundary, for the same reason: a scoring module
+    // that can see the flag will eventually branch on it.
+    const sealed = ['score.ts', 'slate.ts', 'explain.ts', 'retrieval.ts', 'features.ts', 'demand.ts'];
+    for (const file of sealed) {
+      const source = readFileSync(join(CORE_DIR, file), 'utf8');
+      expect(
+        /from\s+'\.\/shipping\.js'/.test(source),
+        `${file} imports ./shipping.js — it must take ResolvedParams instead`,
+      ).toBe(false);
+    }
+  });
+
+  it('the diagnostics parameter override is never used by application code', () => {
+    // paramsOverride exists so an offline sweep can vary one weight without the
+    // edit-run-revert dance, which leaves no trace in a diff and is therefore
+    // indistinguishable from tuning. In app code it would be a constant.
+    const adapterDir = join(import.meta.dirname, '..', 'src', 'ranking', 'adapter');
+    for (const f of readdirSync(adapterDir).filter((x) => x.endsWith('.ts'))) {
+      const source = code(readFileSync(join(adapterDir, f), 'utf8'));
+      expect(
+        /paramsOverride\s*:/.test(source),
+        `${f} sets paramsOverride — that field is for diagnostics only`,
+      ).toBe(false);
+    }
+  });
+});
+
 describe('adapter boundary', () => {
   it('only adapter/supabase.ts is coupled to the Supabase client API', () => {
     // index.ts re-exports the factory by name, which is fine. What must not

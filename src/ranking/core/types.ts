@@ -292,6 +292,13 @@ export interface ResolvedParams {
   exhaustionRate: number;
   /** beta in salience = interest x (1 + beta * novelty) (§1.4). */
   noveltyBoost: number;
+  /**
+   * Exponent on P_accept, P_complete and R_repeat (v1.7 §3.3). 1 is the full
+   * funnel; 0 raises each to the identity, leaving S = P_join. A number rather
+   * than a flag so the ship gate needs no branch and the continuity test covers
+   * it like everything else.
+   */
+  funnelExponent: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +344,42 @@ export interface ScoredCandidate {
   candidate: Candidate;
   features: FeatureVector;
   funnel: FunnelScore;
+}
+
+/**
+ * What gets written to `ranking_events.score_snapshot` on every impression.
+ *
+ * THE POINT OF THE v1.7 BUILD. Every feature the system can compute is recorded
+ * here, **including the ones the shipped ordering ignores** — the whole shelved
+ * ranker's feature set is computed on every deck and logged, while only
+ * proximity, demand and the session penalties decide the order.
+ *
+ * That asymmetry is deliberate and it is cheap. Features cost microseconds;
+ * unlogged history is unrecoverable. Without this, the day someone wants to know
+ * whether `timeFit` predicts anything, the answer is "run the experiment for
+ * three months first".
+ *
+ * Resolved parameters are NOT stored per row — they are a pure function of
+ * (`algo`, `regime`), so storing them would be ~16 numbers duplicated onto every
+ * impression to record something already reconstructable from a git tag.
+ */
+export interface ScoreSnapshot {
+  /**
+   * Schema version of this object. Bump it when the shape changes, and never
+   * reinterpret an older `v` under newer rules — a training set silently
+   * spanning two feature definitions is worse than one that spans none.
+   */
+  v: number;
+  /** Every feature computed, whether or not the shipped ordering used it. */
+  features: FeatureVector;
+  /** The decomposed funnel, including factors currently gated off. */
+  funnel: FunnelScore;
+  /** Density scalar in force, 0 village to 1 city. */
+  regime: number;
+  /** False when the ranker was shelved and the deck was proximity-ordered. */
+  rankerEnabled: boolean;
+  /** Identifies the parameter table in force, so `regime` can be resolved later. */
+  algo: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +452,18 @@ export interface SlateDebug {
 
 export interface RankResult {
   slate: Slate;
+  /**
+   * One snapshot per card in `slate.cards`, same order.
+   *
+   * Deliberately a SIBLING of `slate` rather than a field on `SlateCard`. The
+   * slate is the UI-facing type and a test greps its serialisation for numbers;
+   * telemetry hangs off the result instead, so a component that renders
+   * `slate.cards` cannot accidentally reach a score.
+   *
+   * Always populated, including when `debug` is off — instrumentation is not a
+   * debugging affordance, it is the deliverable.
+   */
+  snapshots: ScoreSnapshot[];
   debug?: SlateDebug;
 }
 
@@ -417,6 +472,19 @@ export interface RankOptions {
   deckSize?: number;
   /** Attach the numeric internals. Never enable this on a UI code path. */
   debug?: boolean;
+  /**
+   * DIAGNOSTICS ONLY. Replaces resolved parameters after the ship gate has run.
+   *
+   * This exists so an offline experiment can vary one weight across a sweep
+   * without editing `constants.ts`, running, and reverting — a dance that leaves
+   * no trace in the diff and is therefore indistinguishable from tuning. Every
+   * number in `DIAGNOSTICS.md` was produced through this field, so every
+   * diagnostic's configuration is visible in the script that ran it.
+   *
+   * A test asserts nothing under `adapter/` ever sets it. If you are reaching
+   * for it in application code, you want a constant.
+   */
+  paramsOverride?: Partial<ResolvedParams>;
 }
 
 export interface RankInput {
@@ -477,8 +545,67 @@ export interface RankingDataPort {
   listExplicitStatements(userId: UserId): Promise<InterestEvent[]>;
   deleteExplicitStatement(userId: UserId, metric: MetricSlug): Promise<void>;
 
-  /** Funnel instrumentation. */
-  logRankingEvent(event: RankingEventWrite): Promise<void>;
+  /**
+   * Funnel instrumentation. BATCHED, deliberately.
+   *
+   * There is no single-event method on the port. One network call per card is
+   * how instrumentation becomes the thing that gets deleted the first time
+   * someone profiles the Discover tab, and a one-card-at-a-time Discover makes
+   * that per-card cost land on every swipe.
+   *
+   * Implementations must not throw: the buffered writer above this treats a
+   * rejection as "retry, then drop", and a throw that escapes it would surface
+   * a logging failure to a user.
+   */
+  logRankingEvents(events: readonly RankingEventWrite[]): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Check-in data path (v1.7 §2.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * One realised pairing. `tandems` is strictly PAIRWISE — this is the primitive,
+ * and a group tandem is a clique of these sharing `groupId`, not a row with
+ * three participants. See SCHEMA.md §3.
+ */
+export interface TandemRecord {
+  tandemId: string;
+  /** The two participants. Order is as stored; the check-in derives rater/rated. */
+  userAId: UserId;
+  userBId: UserId;
+  /** 'completed' is the completion signal for the whole system. */
+  status: string;
+  /**
+   * The post this pairing came from, when the link exists. [S1 in SCHEMA.md §5]
+   * Without it the check-in still writes feedback; only the interest mirror and
+   * the timing gate degrade.
+   */
+  activityId?: ActivityId;
+  /** Category of the linked activity, for the `interest_events` mirror. */
+  category?: CategorySlug;
+  /** When the activity ended. Falls back to a start-plus-duration estimate. */
+  endedAt?: Epoch;
+  createdAt: Epoch;
+}
+
+/** A check-in this user owes, resolved and ready to ask. */
+export interface PendingCheckIn {
+  tandemId: string;
+  /** The user being asked. */
+  raterId: UserId;
+  /** The counterpart being rated. Exactly one, because tandems are pairwise. */
+  ratedId: UserId;
+  activityId?: ActivityId;
+  category?: CategorySlug;
+  /** When the tandem ended — the ordering key. Oldest first. */
+  endedAt: Epoch;
+}
+
+/** A feedback row that already exists, so the same pairing is never asked twice. */
+export interface GivenFeedback {
+  tandemId: string;
+  ratedId: UserId;
 }
 
 /** What the adapter persists between sessions for the density estimate. */
@@ -507,7 +634,13 @@ export interface RankingEventWrite {
   eventType: RankingEventType;
   deckPosition?: number;
   source?: RetrievalSource;
-  /** Per-feature values at impression time. The labels for v2's regression. */
-  scoreSnapshot?: FeatureVector | null;
+  /**
+   * Client-generated, one per app foreground period. There is no server-side
+   * session concept and this build does not add one — a session is "the stretch
+   * of cards someone looked at in one sitting", which only the client can see.
+   */
+  sessionId?: SessionId;
+  /** Every feature and funnel factor at impression time. See ScoreSnapshot. */
+  scoreSnapshot?: ScoreSnapshot | null;
   createdAt: Epoch;
 }

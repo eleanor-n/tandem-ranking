@@ -20,11 +20,16 @@ import { rank } from '../core/rank.js';
 import { buildExplicitStatement, computeInterestState, isCacheFresh, rebuildInterestStateFromEvents } from '../core/interest.js';
 import { computeRegime, paramsFingerprint, resolveParams } from '../core/regime.js';
 import { CONSTANTS } from '../core/constants.js';
+import { createInstrumentation } from './instrumentation.js';
+import type {
+  Instrumentation,
+  InstrumentationStorage,
+  Scheduler,
+} from './instrumentation.js';
 import type {
   ActivityId,
   Candidate,
   Epoch,
-  FeatureVector,
   InterestEvent,
   InterestSource,
   InterestState,
@@ -32,9 +37,7 @@ import type {
   RankOptions,
   RankResult,
   RankingDataPort,
-  RankingEventType,
   ResolvedParams,
-  RetrievalSource,
   SessionId,
   UserId,
 } from '../core/types.js';
@@ -50,6 +53,18 @@ export interface RankingClientConfig {
   newId?: () => string;
   /** Called whenever the ranker degrades or the port errors. Wire to your logger. */
   onError?: (where: string, error: unknown) => void;
+
+  /**
+   * Local storage for the impression buffer, so an app kill does not take the
+   * last few seconds of instrumentation with it. AsyncStorage satisfies the
+   * interface as-is. Omit it and crash persistence is off — a degradation, not
+   * a failure.
+   */
+  storage?: InstrumentationStorage;
+  /** Timer source. Omit to use setTimeout. Injected so tests drive time. */
+  scheduler?: Scheduler;
+  /** Session ids are client-generated, one per app foreground period. */
+  newSessionId?: () => SessionId;
 }
 
 /** Everything the density estimate resolved to. Debug-gated; never UI-facing. */
@@ -111,29 +126,31 @@ export interface RankingClient {
     activityId?: ActivityId;
   }): Promise<void>;
 
-  /** Funnel instrumentation. */
-  logImpression(params: {
-    userId: UserId;
-    activityId: ActivityId;
-    hostId: UserId;
-    deckPosition: number;
-    source: RetrievalSource;
-    features?: FeatureVector | null;
-  }): Promise<void>;
-
-  logEvent(params: {
-    userId: UserId;
-    eventType: RankingEventType;
-    activityId?: ActivityId;
-    hostId?: UserId;
-    deckPosition?: number;
-    source?: RetrievalSource;
-  }): Promise<void>;
+  /**
+   * The buffered impression writer (v1.7 §2.1).
+   *
+   * Not a set of `logX()` methods on this client, on purpose: every one of them
+   * would return a promise, and a promise on the swipe path gets awaited by
+   * someone eventually. `record()` is synchronous and cannot throw. See
+   * adapter/instrumentation.ts.
+   *
+   * Call `restore()` once at startup and `startSession()` on every foreground.
+   */
+  instrumentation: Instrumentation;
 }
 
 export function createRankingClient(config: RankingClientConfig): RankingClient {
   const { port, now } = config;
   const newId = config.newId ?? defaultId;
+
+  const instrumentation = createInstrumentation({
+    port,
+    now,
+    ...(config.storage ? { storage: config.storage } : {}),
+    ...(config.scheduler ? { scheduler: config.scheduler } : {}),
+    ...(config.newSessionId ? { newSessionId: config.newSessionId } : {}),
+    ...(config.onError ? { onError: config.onError } : {}),
+  });
 
   /**
    * Measure this user's density and resolve the parameters for the session.
@@ -260,25 +277,7 @@ export function createRankingClient(config: RankingClientConfig): RankingClient 
       });
     },
 
-    async logImpression({ userId, activityId, hostId, deckPosition, source, features }) {
-      await port.logRankingEvent({
-        userId, activityId, hostId, deckPosition, source,
-        eventType: 'impression',
-        scoreSnapshot: features ?? null,
-        createdAt: now(),
-      });
-    },
-
-    async logEvent({ userId, eventType, activityId, hostId, deckPosition, source }) {
-      await port.logRankingEvent({
-        userId, eventType,
-        ...(activityId ? { activityId } : {}),
-        ...(hostId ? { hostId } : {}),
-        ...(deckPosition !== undefined ? { deckPosition } : {}),
-        ...(source ? { source } : {}),
-        createdAt: now(),
-      });
-    },
+    instrumentation,
   };
 }
 
@@ -316,4 +315,13 @@ export {
   resolve,
 } from '../core/regime.js';
 export { createSupabaseRankingPort } from './supabase.js';
+export { createInstrumentation } from './instrumentation.js';
+export { RANKER_ENABLED } from '../core/shipping.js';
+export type {
+  Instrumentation,
+  InstrumentationConfig,
+  InstrumentationHealth,
+  InstrumentationStorage,
+  Scheduler,
+} from './instrumentation.js';
 export type * from '../core/types.js';

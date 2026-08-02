@@ -5,6 +5,8 @@
 
 import { describe, expect, it } from 'vitest';
 import { rank } from '../src/ranking/core/rank.js';
+import { resolveParams } from '../src/ranking/core/regime.js';
+import { RANKER_ENABLED } from '../src/ranking/core/shipping.js';
 import { CONSTANTS } from '../src/ranking/core/constants.js';
 import {
   DAY,
@@ -34,6 +36,22 @@ const history: InterestEvent[] = [
  */
 const CITY = { regime: 1 } as const;
 const VILLAGE = { regime: 0 } as const;
+
+/**
+ * v1.7: the ranker is SHELVED, not deleted.
+ *
+ * `RANKER_ENABLED` is false, so by default `rank()` orders by proximity, demand
+ * and the session penalties — no affinity retrieval, no explore swap, no
+ * reserved fresh-host slot, no funnel factors. Tests that exercise the shelved
+ * machinery have to wake it up, and they do it the same way the diagnostics do:
+ * by handing back the ungated parameters.
+ *
+ * This is the point of the parameter-override design. The shelved code is not a
+ * second path that rots — it is the live path with different numbers, and these
+ * tests keep running against it every commit. The day the flag flips, the
+ * ranker works, because it never stopped being tested.
+ */
+const rankerOn = (regime: number) => ({ paramsOverride: resolveParams(regime) });
 
 describe('determinism', () => {
   it('same seed, same deck, ten runs — byte-identical', () => {
@@ -66,7 +84,8 @@ describe('determinism', () => {
     const decks = new Set<string>();
     for (let i = 0; i < 40; i++) {
       decks.add(JSON.stringify(
-        rank({ ...base, sessionId: `sess-${i}` }).slate.cards.map((c) => c.activityId),
+        rank({ ...base, sessionId: `sess-${i}` }, rankerOn(1))
+          .slate.cards.map((c) => c.activityId),
       ));
     }
     expect(decks.size).toBeGreaterThan(1);
@@ -144,7 +163,7 @@ describe('slate constraints', () => {
         now: T0,
         ...CITY,
       },
-      { debug: true },
+      { debug: true, ...rankerOn(1) },
     );
 
     const fresh = new Set(['host_f', 'host_g']);
@@ -175,7 +194,7 @@ describe('slate constraints', () => {
         now: T0,
         ...CITY,
       },
-      { debug: true },
+      { debug: true, ...rankerOn(1) },
     );
 
     expect(result.slate.cards.length).toBe(CONSTANTS.slate.deckSize);

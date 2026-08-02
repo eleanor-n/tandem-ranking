@@ -89,7 +89,18 @@ export function exposureBoost(candidate: Candidate, peerMedianImpressions: numbe
   return starved ? CONSTANTS.retrieval.impressionBoost : 1;
 }
 
-/** S for one candidate, given its features. */
+/**
+ * S for one candidate, given its features.
+ *
+ * `params.funnelExponent` gates the three post-join factors. At 1 this is the
+ * v1.5 product; at 0 each raises to the identity and S is P_join alone, which
+ * is what ships while the ranker is shelved.
+ *
+ * Note that all four factors are still COMPUTED and returned regardless. They
+ * go into the impression snapshot whether or not they influenced the order —
+ * that is how the question "would the funnel have ranked this better?" stays
+ * answerable offline instead of requiring another three months of data.
+ */
 export function scoreFeatures(
   f: FeatureVector,
   params: ResolvedParams,
@@ -100,7 +111,8 @@ export function scoreFeatures(
   const a = pAccept(f);
   const c = pComplete(f);
   const r = rRepeat(f);
-  const base = j * a * c * r * boost;
+  const e = params.funnelExponent;
+  const base = j * Math.pow(a, e) * Math.pow(c, e) * Math.pow(r, e) * boost;
   return {
     pJoin: j,
     pAccept: a,

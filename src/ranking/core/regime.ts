@@ -236,6 +236,10 @@ export function resolveParams(regime: number): ResolvedParams {
     overflowPenalty: resolve(s.overflowPenalty, t),
     exhaustionRate: resolve(s.exhaustionRate, t),
     noveltyBoost: resolve(s.noveltyBoost, t),
+    // Not density-dependent: the funnel is either in force or it is not, and
+    // that is a shipping decision rather than a scale one. It lives in
+    // ResolvedParams anyway so that the ship gate can move it without a branch.
+    funnelExponent: CONSTANTS.shipping.funnelExponent,
   };
 }
 

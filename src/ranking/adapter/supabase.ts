@@ -92,6 +92,11 @@ export const COLUMNS = {
     createdAt: 'created_at',
   },
   interestEvents: { table: 'interest_events' },
+  /**
+   * THE impression table (SCHEMA.md §2). `feed_impressions` is deprecated and
+   * has zero rows; two tables with overlapping jobs is how a training set ends
+   * up split across schemas with no way to join it afterwards.
+   */
   rankingEvents: { table: 'ranking_events' },
   interestState: { table: 'user_interest_state' },
 } as const;
@@ -459,21 +464,37 @@ export function createSupabaseRankingPort(
       }
     },
 
-    async logRankingEvent(event: RankingEventWrite): Promise<void> {
+    /**
+     * ONE INSERT PER BATCH, never per card.
+     *
+     * Discover shows one card at a time, so a per-event write would be a network
+     * round-trip per swipe. Everything above this is a buffer whose entire job is
+     * to make this call rare; a single-row version of this method would exist
+     * only to be misused.
+     *
+     * Errors are reported and swallowed — the buffered writer decides whether to
+     * retry, and a rejected promise escaping here would surface a logging failure
+     * to a user.
+     */
+    async logRankingEvents(events: readonly RankingEventWrite[]): Promise<void> {
+      if (events.length === 0) return;
       try {
-        const { error } = await client.from(COLUMNS.rankingEvents.table).insert({
-          user_id: event.userId,
-          activity_id: event.activityId ?? null,
-          host_id: event.hostId ?? null,
-          event_type: event.eventType,
-          deck_position: event.deckPosition ?? null,
-          source: event.source ?? null,
-          score_snapshot: event.scoreSnapshot ?? null,
-          created_at: toIso(event.createdAt),
-        });
-        if (error) fail('logRankingEvent', error);
+        const { error } = await client.from(COLUMNS.rankingEvents.table).insert(
+          events.map((event) => ({
+            user_id: event.userId,
+            activity_id: event.activityId ?? null,
+            host_id: event.hostId ?? null,
+            event_type: event.eventType,
+            deck_position: event.deckPosition ?? null,
+            source: event.source ?? null,
+            session_id: event.sessionId ?? null,
+            score_snapshot: event.scoreSnapshot ?? null,
+            created_at: toIso(event.createdAt),
+          })),
+        );
+        if (error) fail('logRankingEvents', error);
       } catch (error) {
-        fail('logRankingEvent', error);
+        fail('logRankingEvents', error);
       }
     },
   };

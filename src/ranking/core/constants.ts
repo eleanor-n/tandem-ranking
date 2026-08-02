@@ -574,6 +574,82 @@ export const CONSTANTS = {
   },
 
   // =========================================================================
+  // The ship gate (v1.7 §3.3)
+  // =========================================================================
+  shipping: {
+    /**
+     * Exponent applied to P_accept, P_complete and R_repeat. At 1 the funnel is
+     * the full v1.5 product; at 0 each factor raises to the identity and S is
+     * P_join alone.
+     *
+     * An exponent rather than a boolean so the gate stays a NUMBER: intermediate
+     * values are meaningful (0.5 is a half-strength funnel), the continuity test
+     * covers it, and nothing downstream has to branch.
+     */
+    funnelExponent: 1,
+
+    /** What the exponent becomes while the ranker is shelved. See shipping.ts. */
+    shelvedFunnelExponent: 0,
+  },
+
+  // =========================================================================
+  // Instrumentation (v1.7 §2.1)
+  // =========================================================================
+  //
+  // The deliverable. Every card shown writes one ranking_events row carrying the
+  // FULL feature set — including every feature the shipped ordering ignores —
+  // because features are cheap and unlogged history is unrecoverable.
+  //
+  // Everything here is about not making that expensive. A ranking layer that
+  // costs a network round-trip per swipe is a ranking layer that gets deleted.
+  instrumentation: {
+    /**
+     * Bumped when ScoreSnapshot changes shape. Never reinterpret an older `v`
+     * under newer rules: a training set that silently spans two feature
+     * definitions is worse than one that spans none.
+     */
+    snapshotVersion: 1,
+
+    /**
+     * Identifies the parameter table in force, so `regime` can be resolved back
+     * into the full weight set offline. Storing the ~16 resolved numbers on
+     * every impression would duplicate something already reconstructable from a
+     * git tag.
+     */
+    algoVersion: 'v1.7',
+
+    /**
+     * [UNMEASURED] Flush cadence. Short enough that a backgrounded app has lost
+     * little, long enough that a fast swiper batches. Nobody knows the real
+     * swipe rate yet — that is what this build exists to find out.
+     */
+    flushIntervalMs: 10_000,
+
+    /** [UNMEASURED] Flush early once this many events are buffered. */
+    flushAtEvents: 20,
+
+    /**
+     * [UNMEASURED] Coalescing delay before mirroring the buffer to local
+     * storage. Persisting on every enqueue would put a storage write on the
+     * swipe path, which is the cost this whole design exists to avoid.
+     */
+    persistDebounceMs: 1_000,
+
+    /**
+     * Hard cap on the retained buffer. Past this, the OLDEST events are dropped:
+     * a phone offline for an hour must not accumulate an unbounded array, and
+     * recent events are the ones worth keeping. Drops are counted, never raised.
+     */
+    maxRetainedEvents: 500,
+
+    /**
+     * Consecutive failed flushes before the batch is abandoned. Retrying a
+     * poison batch forever is how a logging layer becomes an outage.
+     */
+    maxFlushRetries: 3,
+  },
+
+  // =========================================================================
   // Determinism
   // =========================================================================
   random: {
