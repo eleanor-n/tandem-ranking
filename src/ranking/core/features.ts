@@ -294,9 +294,16 @@ export function repeatableContext(candidate: Candidate): Unit {
 /**
  * graphAffinity — co-participation proximity between viewer and host.
  *
- * NOT IMPLEMENTED IN v1.5. Returns 0, and CONSTANTS.score.pJoin.graphAffinity
- * is 0, so it contributes nothing. `graph_edges` rows accumulate from day one
- * via the completion trigger so that there is history to switch this on to.
+ * NOT IMPLEMENTED. Returns 0, and the resolved graphAffinity weight is 0 at
+ * both ends of the continuum, so it contributes nothing. Declaring a non-zero
+ * weight on an always-zero feature would not be inert — the weight survives
+ * renormalisation and would cap P_join below 1 for everyone.
+ *
+ * v1.7: `graph_edges` is a DERIVED AGGREGATE over completed `tandems`, rebuilt
+ * by `rebuild_graph_edges()`, not a triggered table. The history is therefore
+ * never missing — it can be recomputed from `tandems` at any time — which is a
+ * strictly better position to switch this on from than the v1.5 arrangement,
+ * where a trigger that silently never fired left the table empty for months.
  *
  * Intended implementation: shortest path length between viewer and host over
  * `graph_edges`, capped at three degrees, mapped through a decay — a

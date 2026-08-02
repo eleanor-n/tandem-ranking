@@ -116,9 +116,17 @@ function freshHostSource(
 /**
  * graph — co-participation graph retrieval. STUB.
  *
- * Returns [] in v1.5 and its quota is redistributed. `graph_edges` is being
- * populated by the completion trigger from day one so there is history to turn
- * this on to.
+ * Returns [] and its quota is redistributed.
+ *
+ * v1.7: `graph_edges` is no longer maintained by a trigger. It is a DERIVED
+ * AGGREGATE over `tandems WHERE status = 'completed'`, rebuilt from scratch by
+ * `rebuild_graph_edges()`. `tandems` is already pairwise with a completion
+ * status, so it is already an edge list — keeping a second copy in sync bought
+ * nothing and added the failure mode that actually hit: the v1.5 trigger
+ * targeted a table that does not exist and silently never fired, so this table
+ * was empty for months and nothing noticed. A missed rebuild now loses nothing,
+ * because the source of truth is elsewhere and the aggregate is reproducible at
+ * any time.
  *
  * Intended implementation: hosts within three degrees of the viewer in
  * `graph_edges`, ordered by (degree asc, edge weight desc). Three degrees
