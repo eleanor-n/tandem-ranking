@@ -427,3 +427,111 @@ problem; the parameters at moderate-to-high density are.
    seeing a result.
 4. **Ship check-ins.** Until `repeatAffinity` is real, exhaustion damps good
    repeats and bad ones equally (F8), and repeat rate is the north star.
+
+---
+---
+
+# v1.7 — Instrumentation first
+
+The framework document was still unavailable. Same rule: anything only it would
+have contained is a numbered claim here. Schema facts moved to
+[`SCHEMA.md`](SCHEMA.md), which is the authoritative reconciliation record and
+overrides the v1.5/v1.6 migrations wherever they disagree.
+
+## H. New inferences and decisions
+
+### H1. The check-in interest source keeps its v1.5 slugs
+
+The build prompt says to mirror check-ins into `interest_events` as
+`checkin_positive` / `checkin_negative`. This repo has used `checkin_yes` /
+`checkin_no` since v1.5, and those slugs key three things: the
+`ranking_events.event_type` check constraint, `INTEREST_SOURCES` (weight 1.2 at
+a 120-day half-life, the highest and longest in the table), and the backfill
+script.
+
+Rows written under the prompt's names would match no `INTEREST_SOURCES` entry
+and therefore fold in at **zero weight** — the single most predictive signal in
+the system, silently contributing nothing. That failure is invisible: the rows
+exist, the counts look right, and the interest vector just never moves.
+
+Kept the existing slugs, routed every write through
+`CONSTANTS.checkin.interestSource`, and put a test on the mapping. Renaming is
+one edit plus a widened check constraint, and the weights come with it.
+**Surfaced rather than resolved silently** — SCHEMA.md §6.
+
+### H2. The ship gate is a parameter override, not a branch
+
+`RANKER_ENABLED = false` could have been `if (!enabled) return proximityDeck()`.
+It is not, because a second code path rots: the shipped one gets the fixes, the
+shelved one quietly stops working, and the day someone flips the flag they find
+the ranker has been broken for four months. It is also the same mode switch that
+v1.6 §1 spent an entire architecture avoiding, reintroduced one level up.
+
+`applyShipGate()` collapses P_join to a proximity delta, quotas to proximity,
+`exploreEpsilon` to 0 and a new `funnelExponent` to 0. All four are values the
+existing code already handles. The shelved ranker is the live pipeline with
+different numbers, and the v1.5/v1.6 tests still run against it every commit by
+passing back the ungated parameters.
+
+`funnelExponent` is a number rather than a boolean deliberately: intermediate
+values are meaningful (0.5 is a half-strength funnel, and §D3 uses exactly
+that), the continuity test covers it like every other parameter, and nothing
+downstream has to branch.
+
+### H3. `paramsOverride` exists so that diagnostics leave a diff
+
+v1.6's decomposition diagnostic was run by editing `constants.ts`, running,
+and reverting — a procedure that leaves no trace and is therefore
+indistinguishable from tuning. `RankOptions.paramsOverride` replaces it. Every
+number in `DIAGNOSTICS.md` was produced through it, so every diagnostic's
+configuration is visible in `scripts/sweep.ts` rather than in a reverted edit.
+
+A test asserts nothing under `adapter/` sets it. In application code it would be
+a constant.
+
+### H4. Host retention is defined as "posted again after the first post settled"
+
+The prompt says "did a user post a second tandem unprompted". Implemented as:
+of the hosts whose **first** post has settled inside the run — i.e. who have
+seen how it went — the fraction who created another post after that settlement.
+
+Keyed on the first post rather than on a raw post count because the raw count
+saturates: at the frozen model's 0.18 posts/day over 120 days almost everyone
+posts twice eventually, so "posted at least twice" separates nothing.
+
+It still saturates somewhat (every arm scores 0.78–0.96), which is reported
+rather than hidden, and is why `retentionAfterEmpty` — the same question
+conditioned on the first post getting **nobody** — is reported alongside it.
+That conditional is the exact event the entire village objective exists to
+prevent, and it is where the signal is.
+
+Computed entirely in `scripts/sweep.ts` from `world.posts`. The frozen
+population model was **not modified** to add it.
+
+### H5. The impression floor stays on while the ranker is shelved
+
+§3.3 names the shipping order as "proximity x demand x session penalties",
+which read strictly would exclude the v1 §5 impression floor. It is kept on
+anyway: its entire purpose is stopping a good post dying from a cold first hour,
+which is host retention, which is now the primary metric. Judged in rather than
+out, and flagged here because it is a departure from the literal instruction.
+
+### H6. `graph_edges` is a derived aggregate, and `tandem_completions` is ignored
+
+`tandems` is already a pairwise edge list with a completion status, so
+`graph_edges` is a convenience aggregate over it and nothing more. Maintaining
+it by trigger bought nothing and added the failure mode that actually occurred.
+`rebuild_graph_edges()` recomputes it; a missed run loses nothing.
+
+`tandem_completions` has 2 rows against 23 completed tandems and its
+`user_id_1` / `user_id_2` columns are dead legacy with zero rows populated. It
+is not read, not written, and not migrated.
+
+### H7. Session penalties are UNMEASURED and were not tuned
+
+`categoryPenalty` and `hostPenalty` are marked `UNMEASURED` in `constants.ts`.
+Nobody knows the median session length: `feed_impressions` is empty, and "3
+cards" is derived from looking at the UI rather than from measuring anyone. They
+were not tuned against the simulator either — the sim drives one deck per person
+per day, so a session is one deck there and the penalties barely engage. Setting
+them from that would launder a guess into a measurement.

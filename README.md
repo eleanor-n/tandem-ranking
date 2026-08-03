@@ -2,7 +2,19 @@
 
 Ranking and interest-modelling layer for **Tandem** — a social app where people
 post local activities that others nearby can join. Platonic companionship, not
-dating. The north star is **repeat-tandem rate**, not joins and not session time.
+dating.
+
+**Primary metric for the beta: host retention** — did someone post a second
+tandem unprompted. Repeat-tandem rate remains the long-run goal and stays
+instrumented, but it is a *ratio*, so it can be won by shrinking the pool, and
+with 23 completed tandems it is unmeasurable anyway. See
+[`DIAGNOSTICS.md`](DIAGNOSTICS.md).
+
+**The ranker is deliberately shelved.** What ships is proximity ordering plus
+demand balancing plus within-session diversity penalties. Everything else stays
+in the repo, tested, computing on every deck, and logged on every impression —
+switched off behind one flag. This build exists to produce the data that would
+justify turning it back on.
 
 Framework-agnostic pure-TypeScript core, a pluggable data port, a Supabase
 reference adapter, a migration, a backfill script, and an offline simulator.
@@ -11,11 +23,19 @@ reference adapter, a migration, a backfill script, and an offline simulator.
 
 ```bash
 npm install
-npm test          # 100 tests
+npm test          # 153 tests
 npm run typecheck
 npm run sim -- --users 40 --days 120 --seed 1 --verbose
 npm run sweep -- --sizes 20,40,80,150,300,600 --seeds 1,2,3
+npm run sweep -- --proximity-sweep        # the §4.4 weight sweep
+npm run graph:rebuild -- --dry-run        # recompute graph_edges from tandems
 ```
+
+**Before applying anything to a real database, read
+[`SCHEMA.md`](SCHEMA.md)** and run the `PRECHECK` block at the top of
+`supabase/migrations/20260802100000_ranking_v1_7_instrumentation.sql`. The v1.5
+and v1.6 migrations were written against a schema that was not available and
+guessed wrong in three places; SCHEMA.md overrides both.
 
 ---
 
@@ -45,6 +65,19 @@ Implements steps **1, 2, 3, 5** of the v1.5 framework:
 | ✅ | Exhaustion (§3), gated by `repeatAffinity` |
 | ✅ | Density sweep across 20–600 users × 3 seeds, with host churn, exhaustion and supply response in the population model |
 | ⚠️ | **The sweep result is negative.** `proximity_only` beats the adaptive ranker by 24–36% on repeat rate at every size ≥80, and on liquidity too. See [`INFERENCES.md` §G](INFERENCES.md). |
+
+**v1.7 — instrumentation first:**
+
+| | |
+|---|---|
+| ✅ | Schema reconciled against the live database, with a `PRECHECK` block of SELECTs per assumption — [`SCHEMA.md`](SCHEMA.md) |
+| ✅ | Impression logging: every card, **every feature including the shelved ranker's**, buffered and batched, never awaited from a render |
+| ✅ | Check-in data path — `tandem_feedback` per pair, mirrored into `interest_events`, skip writes nothing |
+| ✅ | Within-session penalties replace the slot quotas, which were mis-*specified* rather than mistuned |
+| ✅ | Exhaustion disabled with its reactivation condition named |
+| ✅ | `graph_edges` becomes a derived aggregate over `tandems` — no trigger to go silently wrong |
+| ✅ | The ranker shelved behind one flag, as a parameter override rather than a branch |
+| ⚠️ | **The funnel factors are the most damaging thing measured in this build.** Removing `P_accept x P_complete x R_repeat` takes host retention at N=600 from 0.783 to 0.948 and host Gini from 0.931 to 0.430. See [`DIAGNOSTICS.md`](DIAGNOSTICS.md) §D3. |
 
 > ⚠️ **The v2 framework document was not available when this was built.** Only
 > `tandem-matching-algorithm-v1.md` was. Everything the build prompt specified
@@ -88,8 +121,12 @@ here" survives exactly one distracted afternoon.
 | Reason lines claim only what the data proves | `explain.test.ts` |
 | Nothing imports `@supabase/supabase-js` | `purity.test.ts` |
 | No scoring module imports or mentions the regime | `purity.test.ts`, 4 checks |
-| No parameter jumps anywhere on the density continuum | `regime.test.ts` |
+| No parameter jumps anywhere on the density continuum, **no exemptions** | `regime.test.ts` |
 | P_join renormalises to 1 at every regime | `regime.test.ts` + load-time assert |
+| Nothing references the deprecated `feed_impressions` table | `purity.test.ts` |
+| Only `rank.ts` reads the ranker flag; no scoring module imports it | `purity.test.ts` |
+| The diagnostics parameter override is never used by application code | `purity.test.ts` |
+| A session penalty can never reach 0 (a cap in disguise) | load-time assert + `regime.test.ts` |
 
 The Supabase client is typed **structurally** rather than imported, which is why
 the dependency list is empty and why the same code runs on Hermes in an Expo
@@ -137,9 +174,10 @@ The app this plugs into was not available, so verification is layered:
 3. **Offline simulation** (`npm run sim`) against a synthetic population with
    *hidden* preferences the ranker never sees, benchmarked against `proximity`,
    `popularity` and `random` baselines on the same seed.
-4. **Shadow mode**, once wired: rank client-side, log impressions with the
-   feature snapshot, render the existing order. Costs one write per card and
-   gives you the v2 training set before you have changed anything a user sees.
+4. **Shadow mode**, which as of v1.7 is no longer hypothetical — it is what
+   ships. The full feature set is computed and logged on every impression while
+   only proximity, demand and the session penalties order the deck. That is the
+   v2 training set accumulating before anything a user sees has changed.
 
 The simulator found a result worth taking seriously before shipping: **pure
 nearest-first currently beats the full ranker on repeat rate**, by 7–14% across
@@ -151,13 +189,20 @@ that I changed its user model after seeing a result I did not like — is in
 
 ## Before applying the migration
 
-Two things in the completion trigger are guesses, marked `[CONFIG]` in the SQL:
+Both of the v1.5 guesses named here were **wrong**, and both are corrected in
+v1.7:
 
-- participants live in `public.activity_participants(activity_id, user_id, status)`
-- completion is `activities.status` transitioning to `'completed'`
+- `public.activity_participants` **does not exist**. The v1.5 completion trigger
+  targeted it, its `to_regclass` guard skipped attachment, and `graph_edges` was
+  empty for months with nothing to notice.
+- completion is `tandems.status`, not `activities.status`.
+
+Read [`SCHEMA.md`](SCHEMA.md), run the `PRECHECK` block at the top of the v1.7
+migration, and only then apply. Six assumptions remain unverifiable from the
+repo alone and are tabulated in SCHEMA.md §5.
 
 Adapter column names are in one `COLUMNS` object at the top of
-`src/ranking/adapter/supabase.ts`. Reconcile both against the real schema, then:
+`src/ranking/adapter/supabase.ts`. Then:
 
 ```bash
 # always dry-run first — prints per-user counts and writes nothing
