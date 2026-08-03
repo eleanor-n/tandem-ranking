@@ -113,6 +113,8 @@ retrieval source returns `[]`, both with their final signatures.
 | S4 | `tandem_feedback.response` accepts a boolean-ish yes/no | The check-in answer is binary | The writer sends whatever `CONSTANTS.checkin.responseValues` says; one edit |
 | S5 | The v1.5 and v1.6 migrations were actually applied | v1.7 is additive on top of them | Every v1.7 statement is independently guarded with `IF NOT EXISTS`, so v1.7 applies cleanly either way |
 | S6 | `activities` has `impression_count`, or it does not and the adapter reads 0 | The impression floor | Degrades to "no post is ever starved", which is inert, not wrong |
+| S7 | `tandems` has `created_at` | `rebuild_graph_edges()` uses it for `first_seen` / `last_seen` | The rebuild fails loudly at the first run. Substitute whatever timestamp column P3 reveals — the edge weights do not depend on it |
+| S8 | `graph_edges.user_a` / `user_b` accept whatever `tandems.user_a_id` contains | The v1.5 table declares FKs to `profiles(id)` | A completed tandem referencing a deleted profile would fail the rebuild. Drop the FK or filter the select |
 
 ---
 
