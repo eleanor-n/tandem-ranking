@@ -128,7 +128,40 @@ would explain v1.6's decline from 0.562 at N=40 to 0.419 at N=600.
 npm run sweep -- --exhaustion on     # v1.6 rates, via paramsOverride
 ```
 
-_Results below._
+**Observed:** `regime_adaptive` repeat rate, exhaustion off (shipped) against
+exhaustion restored to the v1.6 rates:
+
+| N | exhaustion **off** | exhaustion **on** | delta |
+|---:|---:|---:|---:|
+| 40 | 0.578 | 0.548 | −0.030 |
+| 80 | 0.519 | 0.464 | −0.055 |
+| 150 | 0.466 | 0.427 | −0.039 |
+| 300 | 0.460 | 0.428 | −0.032 |
+| 600 | 0.464 | 0.417 | −0.047 |
+
+**Held: directionally yes, but the magnitude does not carry the claim.**
+
+The predicted mechanism is real and visible. Exhaustion costs repeat rate at
+every size, and it costs more at high density than at low (−0.030 at N=40 versus
+−0.047 at N=600), which is exactly what "accumulates with completions, and
+completions grow with N" predicts.
+
+But it explains almost none of what it was invoked for. v1.6's decline was
+0.562 at N=40 down to 0.419 at N=600, a drop of 0.131. Turning exhaustion off
+changes that decline to 0.578 → 0.464, a drop of 0.114. **Exhaustion accounts
+for roughly 13% of the decline.** The other 87% is something else — and §D3
+finds it.
+
+The shipped arm tells the same story more sharply: with exhaustion re-enabled
+its repeat rate at N=600 falls from 0.518 to 0.448, while host retention barely
+moves (0.960 to 0.953). So disabling exhaustion was clearly right on repeat rate
+and approximately free on the primary metric, which is the best case for a
+change made on principle rather than on evidence.
+
+*This confirms rather than contradicts v1.6.* §F8 called `repeatAffinity` being
+inert "the single most important thing to fix", and predicted exhaustion was
+damping good repeats along with bad ones. It was. It just was not the main
+event.
 
 ---
 
