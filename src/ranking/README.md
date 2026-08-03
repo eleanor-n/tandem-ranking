@@ -506,6 +506,36 @@ Read `scripts/simulate.ts` before trusting a number from it. Its user model is a
 guess, and where the guess is wrong the metric is wrong — see the note in
 `INFERENCES.md` about what the simulator does not model.
 
+## How to read the diagnostics
+
+[`DIAGNOSTICS.md`](../../DIAGNOSTICS.md) is four pre-registered hypotheses with
+what was predicted, what was observed, and whether it held. Read it in this
+order:
+
+1. **The metric-change note first.** Repeat rate is a ratio and can be won by
+   shrinking the pool; host retention is a count and cannot. If you read the
+   tables without that, the arms look like they swapped places for no reason.
+2. **§D3 before §D1.** §D3 is the strongest result in the build and it is
+   against the ranker, so by the standing caveat it is the one to believe.
+3. **Both retention columns.** The headline saturates in this simulator. The
+   `retention after empty` column — the same question conditioned on the first
+   post getting nobody — is where the separation is.
+
+Every configuration is applied through `RankOptions.paramsOverride` and the
+command is printed above each table, so any row can be reproduced without
+editing a constant. That is deliberate: v1.6's decomposition was run by editing
+`constants.ts` and reverting, which leaves no trace and is indistinguishable
+from tuning.
+
+Re-run everything with:
+
+```bash
+npm run sweep -- --md sweep-results.md --csv sweep-results.csv
+npm run sweep -- --exhaustion on            # §D2
+npm run sweep -- --sizes 600 --funnel-exponent 0    # §D3 ablation
+npm run sweep -- --proximity-sweep          # §D4
+```
+
 ## Things that are deliberately not here
 
 - **Graph consumption.** Written, never read. See above.
