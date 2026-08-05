@@ -250,6 +250,28 @@ export interface Viewer {
   seenHostIds: UserId[];
   /** Viewers the host trusts — drives auto-accept. */
   trustedByHostIds: UserId[];
+
+  // -------------------------------------------------------------------------
+  // Requester reputation (v1.8 §1.2)
+  //
+  // What a HOST would want to know about the person asking. All optional and
+  // all prior-smoothed downstream, so a brand-new viewer lands at exactly
+  // neutral rather than at zero — a cold-start penalty on P_accept would mean
+  // the deck punishes you for not having used the app yet.
+  // -------------------------------------------------------------------------
+
+  /** Completed tandems, either side. Derived from `tandems` (SCHEMA.md §1). */
+  completedTandems?: number;
+  /** Requests this viewer had accepted. The denominator for follow-through. */
+  acceptedRequests?: number;
+  /** Accepted, then did not happen. The numerator hosts actually care about. */
+  noShows?: number;
+  /**
+   * Categories the viewer has posted in themselves. Hosts accept people who do
+   * this kind of thing — and unlike the other three, this one VARIES ACROSS
+   * CARDS, which is what lets it affect ordering rather than just level.
+   */
+  postedCategories?: CategorySlug[];
 }
 
 // ---------------------------------------------------------------------------

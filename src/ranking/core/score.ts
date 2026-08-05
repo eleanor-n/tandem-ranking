@@ -13,7 +13,7 @@
  */
 
 import { CONSTANTS } from './constants.js';
-import { computeFeatures } from './features.js';
+import { buildScoringContext, computeFeatures } from './features.js';
 import { NEUTRAL_DEMAND, demandAdjustment, type DemandAdjustment } from './demand.js';
 import { TERM_CLASS, type TermName } from './classification.js';
 import type {
@@ -44,11 +44,11 @@ import type {
  * it cannot quietly drift from what the code actually multiplies.
  */
 export const MULTIPLICATIVE_LEAVES: readonly TermName[] = [
-  'acceptLikelihood',      // via pAccept
-  'completionPrior',       // via pComplete
-  'freshness',             // via pComplete
-  'repeatableContext',     // via rRepeat
-  'rhythmOverlap',         // via rRepeat
+  'acceptLikelihood',      // via pAccept — pairwise as of v1.8 §1.2
+  'completionPrior',       // via pComplete — global_quality, §1.3 converts to a gate
+  'freshness',             // via pComplete — global_quality, folded into the gate
+  'repeatableContext',     // via rRepeat — global_quality, §1.4 dampens or drops
+  'rhythmOverlap',         // via rRepeat — pairwise
   'exposureBoost',
   'demandMultiplier',
 ];
@@ -69,10 +69,11 @@ export const PJOIN_SUMMANDS: readonly TermName[] = [
 /**
  * How many of the multiplied leaves are global-quality terms.
  *
- * Currently FOUR, and that is the defect v1.8 exists to repair — stated as a
+ * Was FOUR before v1.8. §1.2 moved `acceptLikelihood` out by restoring its
+ * viewer-dependence, leaving three; §1.3 and §1.4 take the rest. Stated as a
  * number the build can check rather than as a paragraph someone might disagree
- * with. `tests/classification.test.ts` asserts this count, so it can shrink
- * (as §1.2-1.4 land) but cannot silently grow.
+ * with — `tests/classification.test.ts` pins it, so it can shrink but never
+ * silently grow.
  */
 export const GLOBAL_QUALITY_MULTIPLIER_COUNT: number =
   MULTIPLICATIVE_LEAVES.filter((t) => TERM_CLASS[t] === 'global_quality').length;
@@ -198,9 +199,13 @@ export function scoreCandidates(
   params: ResolvedParams,
 ): ScoredCandidate[] {
   const peerMedian = peerMedianImpressions(candidates);
+  // Built once per pool. Global-quality terms are only admissible once
+  // rank-normalised against the population they claim to rank within, and that
+  // population is not visible from inside a per-candidate function.
+  const context = buildScoringContext(candidates);
 
   const scored = candidates.map((candidate) => {
-    const features = computeFeatures(viewer, candidate, state, now);
+    const features = computeFeatures(viewer, candidate, state, now, context);
     const funnel = scoreFeatures(
       features,
       params,

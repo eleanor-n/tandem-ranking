@@ -59,15 +59,16 @@ describe('the classification is total and honest', () => {
     }
   });
 
-  it('does not call a host-only term pairwise just because it takes a viewer', () => {
-    // The self-deception this file exists to stop. `acceptLikelihood(viewer, c)`
-    // has a `viewer` parameter and reads exactly one bit off it — verification
-    // status, worth a x1.05 nudge. That is not two-sidedness. It is classified
-    // by what it DEPENDS ON, which today is the host.
-    //
-    // When §1.2 makes it genuinely conditional on the asker, this expectation
-    // flips, and the diff is the repair.
-    expect(TERM_CLASS.acceptLikelihood).toBe('global_quality');
+  it('promotes a term only when its dependence actually changed', () => {
+    // `acceptLikelihood` was `global_quality` through v1.7: it took a `viewer`
+    // argument and read one bit off it, worth a x1.05 nudge. §1.2 moved it to
+    // `pairwise`, and the move is earned by the `pickiness` factor rather than
+    // by the signature — see the pickiness tests below.
+    expect(TERM_CLASS.acceptLikelihood).toBe('pairwise');
+
+    // The host half did NOT get promoted with it. It is still one global number
+    // per host; it is admissible only because it no longer appears as a factor
+    // of its own.
     expect(TERM_CLASS.hostReliability).toBe('global_quality');
   });
 
@@ -94,7 +95,6 @@ describe('the guard fires on the current score', () => {
     );
 
     expect(offenders.sort()).toEqual([
-      'acceptLikelihood',
       'completionPrior',
       'freshness',
       'repeatableContext',
@@ -105,7 +105,7 @@ describe('the guard fires on the current score', () => {
   });
 
   it('pins the violation count so it can shrink but never grow', () => {
-    expect(GLOBAL_QUALITY_MULTIPLIER_COUNT).toBeLessThanOrEqual(4);
+    expect(GLOBAL_QUALITY_MULTIPLIER_COUNT).toBeLessThanOrEqual(3);
   });
 
   it('passes cleanly once the global-quality terms are gone', () => {

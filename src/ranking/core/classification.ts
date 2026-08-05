@@ -111,21 +111,25 @@ export const TERM_CLASS = {
   rhythmOverlap: 'pairwise',
   /** Co-participation distance viewer -> host. Stubbed at neutral. */
   graphAffinity: 'pairwise',
-  // --- global quality: BANNED as raw multipliers ----------------------------
   /**
-   * P_accept.
+   * P_accept. MOVED HERE FROM global_quality BY v1.8 §1.2.
    *
-   * CLASSIFIED HONESTLY AS IT STANDS, not as it is meant to be. Today this is
-   * `hostReliability` with a x1.05 nudge if the viewer is verified — a single
-   * bit of viewer input on a term that is otherwise entirely about the host.
-   * That is not two-sidedness, and calling it `pairwise` because it takes a
-   * `viewer` argument would be the exact self-deception this file exists to
-   * stop.
+   *   hostRank^rho x (1 + pickiness x viewerDeviation(u, a))
    *
-   * v1.8 §1.2 makes it genuinely conditional on the asker, at which point this
-   * line moves up to `pairwise` and the diff shows the repair.
+   * The move is earned by the `pickiness` factor, not by the viewer argument.
+   * A viewer's reputation is one number applied to every card in their deck, so
+   * on its own it rescales the deck and reorders nothing — the ordering would
+   * still have been `hostRank^rho`, the same global consensus at lower volume.
+   * Scaling that reputation by how selective the HOST is makes the term
+   * genuinely conditional on the pair.
+   *
+   * The host half is still global, still rank-normalised, still dampened, and
+   * still classified `global_quality` on its own line below. It is admissible
+   * here because it no longer appears as a factor of its own.
    */
-  acceptLikelihood: 'global_quality',
+  acceptLikelihood: 'pairwise',
+
+  // --- global quality: BANNED as raw multipliers ----------------------------
   /**
    * The host's smoothed accept rate. The original offender. Survives only
    * INSIDE `acceptLikelihood`, rank-normalised against the live host population

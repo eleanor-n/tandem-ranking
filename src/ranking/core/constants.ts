@@ -201,6 +201,82 @@ export const CONSTANTS = {
     thinDataDefault: 0.5,
 
     /**
+     * [v1.8 §1.2] P_accept, repaired.
+     *
+     *   P_accept(a, u) = hostRank(a)^rho x (1 + pickiness(a) x viewerDeviation(u, a))
+     *
+     * The original was `hostReliability` with a x1.05 nudge for a verified
+     * viewer — one global scalar per host, in a term whose whole justification
+     * was two-sidedness. Every client sorted the same hosts up. Gini 0.931.
+     *
+     * Two things changed, and they fix different halves of the problem:
+     *
+     *   MAGNITUDE. `hostRank` is rank-normalised against the live host pool
+     *   rather than used raw, then raised to `hostAcceptDamping`. Being the
+     *   most reliable host should be an advantage, not a monopoly.
+     *   Rank-normalisation also makes the term scale-invariant, which a raw
+     *   accept rate is not: a 0.8 accept rate means something different in a
+     *   pool where everyone is at 0.9 than in one where everyone is at 0.4.
+     *
+     *   CONSENSUS. `pickiness` is what actually restores two-sidedness. A
+     *   viewer's reputation is the same number for every card they see, so on
+     *   its own it rescales their whole deck uniformly and changes no ordering
+     *   at all. Multiplied by how selective the HOST is, it becomes genuinely
+     *   pairwise: a host who accepts everyone does not care about your record,
+     *   a selective one does. That is what "does THIS host accept YOU" means,
+     *   and without it the repair would be cosmetic.
+     */
+    acceptance: {
+      /**
+       * [UNMEASURED] rho. 0 flattens the host term entirely, 1 is raw rank.
+       * 0.5 halves the spread between the best and worst host in the pool.
+       * v1.8 §3 sweeps it; that sweep is what decides whether this repair is
+       * the right one.
+       */
+      hostAcceptDamping: 0.5,
+
+      /**
+       * [new] Saturation constant for viewer experience: sat(n) = n / (n + k).
+       * At k = 3, three completed tandems reads as half-experienced. Low
+       * because the signal saturates fast in reality — a host cares that you
+       * have shown up before, not that you have shown up forty times.
+       */
+      experienceK: 3,
+
+      /**
+       * [new] Weights on the viewer-side deviation. Sum to 1 so the deviation
+       * stays interpretable as "how far from a neutral requester".
+       *
+       * `followThrough` dominates because it is the only one that answers the
+       * question a host is actually asking: if I say yes, will you turn up.
+       */
+      weights: {
+        verification: 0.10,
+        experience: 0.15,
+        followThrough: 0.35,
+        categoryFamiliarity: 0.20,
+        /**
+         * STUB — graphCloseness returns exactly neutral, so this weight
+         * contributes exactly zero deviation. Unlike the P_join case (§F2),
+         * declaring a real weight here is SAFE: the deviation form is centred
+         * at neutral, so an inert term adds 0 rather than surviving
+         * renormalisation and depressing everyone. Set the feature live and
+         * this weight starts working with no other edit.
+         */
+        graphCloseness: 0.20,
+      },
+
+      /**
+       * [UNMEASURED] Bounds on the deviation, before pickiness scales it.
+       * Asymmetric on purpose: a bad record should cost you more than a good
+       * one gains, because that is how hosts behave — but the floor is well
+       * above -1 so the deck never becomes a reputation gate.
+       */
+      deviationFloor: -0.40,
+      deviationCeiling: 0.25,
+    },
+
+    /**
      * [v1] repeatableContext by category class. The platonic-specific weighting:
      * friendship forms through recurrence, so recurring contexts get structural
      * preference. This is the single most product-shaping constant here — it is
