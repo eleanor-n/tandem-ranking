@@ -77,7 +77,9 @@ Implements steps **1, 2, 3, 5** of the v1.5 framework:
 | ✅ | Exhaustion disabled with its reactivation condition named |
 | ✅ | `graph_edges` becomes a derived aggregate over `tandems` — no trigger to go silently wrong |
 | ✅ | The ranker shelved behind one flag, as a parameter override rather than a branch |
-| ⚠️ | **The funnel factors are the most damaging thing measured in this build.** Removing `P_accept x P_complete x R_repeat` takes host retention at N=600 from 0.783 to 0.948 and host Gini from 0.931 to 0.430. See [`DIAGNOSTICS.md`](DIAGNOSTICS.md) §D3. |
+| ✅ | Four pre-registered diagnostics — [`DIAGNOSTICS.md`](DIAGNOSTICS.md) |
+| ⚠️ | **The funnel factors are the most damaging thing measured in this build.** They are the only *viewer-independent* terms in the score, so a greedy per-viewer ranker turns them into a rich-get-richer loop. Sweeping them out is monotone on five metrics: at N=600 host retention 0.783 → 0.948, zero-joiner posts 51.2% → 9.4%, Gini 0.931 → 0.430 — and deck relevance *rises*. §D3. |
+| ⚠️ | **`w_proximity`'s scaled pair is contradicted and should collapse to a scalar.** No density prefers less proximity; the gain is largest at N=600, which is the opposite of `{village 0.40, city 0.20}`. §D4. |
 
 > ⚠️ **The v2 framework document was not available when this was built.** Only
 > `tandem-matching-algorithm-v1.md` was. Everything the build prompt specified
