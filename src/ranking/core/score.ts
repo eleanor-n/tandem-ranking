@@ -15,6 +15,7 @@
 import { CONSTANTS } from './constants.js';
 import { computeFeatures } from './features.js';
 import { NEUTRAL_DEMAND, demandAdjustment, type DemandAdjustment } from './demand.js';
+import { TERM_CLASS, type TermName } from './classification.js';
 import type {
   Candidate,
   Epoch,
@@ -25,6 +26,56 @@ import type {
   ScoredCandidate,
   Viewer,
 } from './types.js';
+
+/**
+ * THE LEAF TERMS THAT ENTER THE SCORE MULTIPLICATIVELY.
+ *
+ * Not the composites (`pAccept`, `pComplete`, `rRepeat`) — the leaves inside
+ * them, because a composite hides what it is made of and hiding is how
+ * `completionPrior` ended up as a global quality multiplier without anyone
+ * choosing that.
+ *
+ * P_join's constituents are deliberately absent: they enter through a weighted
+ * SUM, and a weighted sum of per-viewer terms is itself per-viewer. It is
+ * multiplication by a viewer-independent factor that creates consensus, not
+ * addition inside a viewer-dependent one.
+ *
+ * `tests/classification.test.ts` cross-checks this list against the source, so
+ * it cannot quietly drift from what the code actually multiplies.
+ */
+export const MULTIPLICATIVE_LEAVES: readonly TermName[] = [
+  'acceptLikelihood',      // via pAccept
+  'completionPrior',       // via pComplete
+  'freshness',             // via pComplete
+  'repeatableContext',     // via rRepeat
+  'rhythmOverlap',         // via rRepeat
+  'exposureBoost',
+  'demandMultiplier',
+];
+
+/**
+ * Terms P_join sums. Listed so the source scan can tell "summed inside P_join"
+ * from "multiplied into the product" — the whole distinction this build turns on.
+ */
+export const PJOIN_SUMMANDS: readonly TermName[] = [
+  'categoryAffinity',
+  'intentMatch',
+  'proximity',
+  'timeFit',
+  'socialContext',
+  'graphAffinity',
+];
+
+/**
+ * How many of the multiplied leaves are global-quality terms.
+ *
+ * Currently FOUR, and that is the defect v1.8 exists to repair — stated as a
+ * number the build can check rather than as a paragraph someone might disagree
+ * with. `tests/classification.test.ts` asserts this count, so it can shrink
+ * (as §1.2-1.4 land) but cannot silently grow.
+ */
+export const GLOBAL_QUALITY_MULTIPLIER_COUNT: number =
+  MULTIPLICATIVE_LEAVES.filter((t) => TERM_CLASS[t] === 'global_quality').length;
 
 /**
  * P_join — would this viewer tap "i'm in" if shown this card?

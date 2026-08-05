@@ -109,6 +109,85 @@ not pin a client version against the host app's. Column names are collected in
 one `COLUMNS` object at the top of the file; reconcile them with the real schema
 before shipping.
 
+## Term classification (v1.8 §1.1)
+
+**Read this before adding anything to the score.** It is the one piece of this
+module that is about arithmetic rather than product, and getting it wrong is not
+visible in any single function.
+
+A ranker in a two-sided marketplace does two jobs:
+
+| | |
+|---|---|
+| **relevance** | which of these is best *for this viewer* — per-viewer |
+| **allocation** | who gets seen at all, across all viewers — population-level |
+
+A product of per-viewer scores can only do the first. Any factor in that product
+whose value does not depend on the viewer performs allocation **as an invisible
+side effect**: every client independently sorts the same items upward, because
+every client was handed the same preference order. Nobody decides this. It falls
+out of the multiplication.
+
+v1.7 §D3 measured the consequence — host-attention Gini 0.931, losing to
+`random` on host retention, and *deck relevance lower than with the terms
+removed*. That last part is what settles it. It was never fairness versus
+relevance; the terms were displacing wanted cards **and** concentrating
+attention, simultaneously.
+
+### The table
+
+| term | class | treatment |
+|---|---|---|
+| `categoryAffinity` | per-viewer | summed in P_join |
+| `intentMatch` | per-viewer | summed in P_join |
+| `proximity` | per-viewer | summed in P_join |
+| `timeFit` | per-viewer | summed in P_join |
+| `socialContext` | pairwise | summed in P_join |
+| `rhythmOverlap` | pairwise | multiplier, via `R_repeat` |
+| `graphAffinity` | pairwise | stub, weight 0 |
+| `acceptLikelihood` | **global-quality** → pairwise (§1.2) | rank-normalised host term × viewer acceptability |
+| `hostReliability` | **global-quality** | only *inside* `acceptLikelihood`, rank-normalised and dampened |
+| `completionPrior` | **global-quality** | gate, not multiplier (§1.3) |
+| `freshness` | **global-quality** | folded into the gate |
+| `repeatableContext` | **global-quality** | rank-normalised + dampened, or dropped (§1.4) |
+| `exposureBoost` | global-allocation | multiplier — allowed and load-bearing |
+| `demandMultiplier` | global-allocation | multiplier — allowed and load-bearing |
+
+### Why the rule is not "no global multipliers"
+
+`exposureBoost` and the demand terms are viewer-independent too, and they are
+fine. They *are* the allocation job, done on purpose, by terms whose entire
+content is population state — how many impressions has this had, how full is it,
+how soon is it. Banning them would ban the only machinery that pushes back on
+concentration.
+
+The rule is:
+
+> **No global *quality* multipliers.**
+
+A global term ranking items by how good they are, multiplied into a per-viewer
+product, is the defect. A global term ranking items by how under-served they are
+is the corrective. They are opposites, and `TermClass` in
+[`core/classification.ts`](core/classification.ts) is what lets the build tell
+them apart.
+
+### How it is enforced
+
+`score.ts` declares `MULTIPLICATIVE_LEAVES` — the *leaf* terms that enter the
+product, not the composites, because a composite hides what it is made of and
+hiding is how `completionPrior` became a global quality multiplier without
+anyone choosing that. `tests/classification.test.ts` then:
+
+- fails if any feature in `FeatureVector` is unclassified
+- fails if a declared leaf is `global_quality`
+- cross-checks the declared list against a scan of `score.ts`, so it cannot
+  drift from the expression it claims to describe
+- asserts P_join *sums* its constituents rather than multiplying them
+
+**These tests currently document a defect that is still present.** Four
+multiplied leaves are `global_quality`. That count is pinned so it can shrink as
+§1.2–1.4 land, and cannot silently grow.
+
 ## What is on, and what is off (v1.7)
 
 **The ranker is shelved, not deleted.** `RANKER_ENABLED` in `core/shipping.ts`
