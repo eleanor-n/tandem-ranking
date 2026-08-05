@@ -535,3 +535,35 @@ cards" is derived from looking at the UI rather than from measuring anyone. They
 were not tuned against the simulator either — the sim drives one deck per person
 per day, so a session is one deck there and the penalties barely engage. Setting
 them from that would launder a guess into a measurement.
+
+### H8. The §4.4 verdict was noise before it was a finding
+
+The proximity sweep's first run, at three seeds, named three different optima at
+three densities and concluded that the scaled pair was justified — i.e. it
+validated the existing design. Re-running the same `w` against different seed
+triples showed a seed-to-seed spread of up to 0.051 against an across-`w` range
+of 0.108. The optima were noise draws.
+
+`Aggregate` now carries the standard error across seeds and the verdict is gated
+at two standard errors above the median, printing `OPTIMUM UNIDENTIFIABLE` when
+it fails. At six seeds the answer inverts: retention is flat in `w`, repeat rate
+rises monotonically to the edge of the swept range at every density, and the
+*gain* from more proximity is largest at N=600 — the opposite of what the
+`{village 0.40, city 0.20}` pair asserts.
+
+Recorded here because the failure mode is the one worth guarding against: a
+diagnostic that finds in favour of the thing it is testing, from noise, and is
+believed because the conclusion was comfortable.
+
+### H9. One harness change, and why it is disclosed
+
+`scripts/sweep.ts` replaced a per-card linear `world.posts.find()` with a `Map`.
+`population.ts` — the frozen model — is untouched, and `regime_adaptive` at
+N=300 reproduces its pre-change row byte for byte.
+
+Disclosed because the bias was systematic rather than uniform: the scan is
+quadratic in run length, and an arm that completes more tandems creates more
+posts through supply response, so **the best-performing configurations were the
+slowest to measure.** Two ablations had already been abandoned for time before
+the fix. A harness whose cost correlates with the result is a harness that
+selects which results get collected.

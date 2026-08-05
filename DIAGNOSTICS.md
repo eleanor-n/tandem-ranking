@@ -179,7 +179,98 @@ and it gets investigated before anything else is reported.
 | 300 | 0.824 | 0.860 | loses |
 | 600 | 0.783 | 0.858 | loses |
 
-_Investigation below._
+`full_ranker_fixed` loses too, by about the same amount. `shipped` and
+`proximity_only` beat `random` comfortably at every size.
+
+### The investigation
+
+**Not a coding bug.** The first thing to rule out was the arm being misconfigured
+— it is woken from the shelf through `paramsOverride`, which is new. It is not:
+re-running `regime_adaptive` at `funnelExponent = 1` reproduces the main sweep's
+row byte for byte (0.824 / 0.768 / 0.460 / 12.814 / 39.2% / 18.9% / 0.884 /
+0.094). The arm is doing exactly what the v1.6 ranker did.
+
+It is also not failing to generate joins. At N=600 it produces 13.97
+tandems/user against `random`'s 5.16, and its deck relevance is 0.096 against
+0.055. It is **better than random at picking cards and worse than random at
+keeping hosts.**
+
+That narrows it to distribution, and the Gini says so loudly: 0.931 for
+`regime_adaptive` against 0.645 for `random` and 0.398 for `shipped`. The
+ranker's attention is concentrated on a handful of hosts, everyone else's posts
+get nobody (52.9% zero-joiner against `random`'s 42.9%), and they churn.
+
+**Two candidate mechanisms, tested separately.**
+
+*Could demand balancing have absorbed it?* §2 exists for exactly this failure,
+and at city scale `demandWeight` resolves to 0.10. Forcing it to 0.50 — the
+village value, five times the shipped one, at maximum density:
+
+| N=600, three seeds | retention | zero-joiner | hosts alive | Gini |
+|---|---:|---:|---:|---:|
+| `regime_adaptive` | 0.783 | 51.2% | 12.2% | 0.931 |
+| + demand at 5x | 0.809 | 41.2% | 15.6% | 0.899 |
+| `random` | 0.858 | 42.9% | 22.7% | 0.645 |
+
+Five times the demand weight closes about a third of the gap to `random` and
+still loses to it. **Demand balancing cannot absorb this.**
+
+*Is it the funnel?* `P_accept`, `P_complete` and `R_repeat` are the only terms in
+the score that are **viewer-independent**. `proximity` differs per viewer — my
+nearest posts are not yours — but a host's accept rate and completion rate are
+the same number for everyone. Put a global quality term into a greedy per-viewer
+ranker and every client independently ranks the same hosts up. That is a
+rich-get-richer loop, and it is structural rather than a mistake in the code.
+
+Sweeping `funnelExponent` from 1 (full v1.5 funnel) to 0 (P_join alone), at
+N=300, three seeds:
+
+| funnelExponent | retention | repeat rate | tandems/user | zero-joiner | hosts alive | Gini | deck relevance |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| **1.00** | 0.824 | 0.460 | 12.81 | 39.2% | 18.9% | 0.884 | 0.094 |
+| 0.75 | 0.820 | 0.462 | 14.04 | 33.2% | 21.9% | 0.850 | 0.101 |
+| 0.50 | 0.868 | 0.438 | 15.43 | 24.2% | 30.8% | 0.756 | 0.112 |
+| 0.25 | 0.894 | 0.430 | 15.99 | 16.9% | 41.9% | 0.624 | 0.121 |
+| **0.00** | **0.928** | 0.408 | 15.35 | **12.9%** | **50.7%** | **0.484** | **0.128** |
+
+**Monotone on five metrics simultaneously.** Zero-joiner rate, surviving hosts,
+Gini and deck relevance move in one direction across every step; retention
+follows after the first. At N=600 the endpoints are starker still: retention
+0.783 → 0.948, zero-joiner 51.2% → 9.4%, hosts alive 12.2% → 57.1%, Gini
+0.931 → 0.430.
+
+**Verdict: a design failure, not a bug — and the largest single finding in this
+build.**
+
+The instruction was that losing to `random` indicates a bug. It does not here,
+and the reason it does not is worth stating precisely: the ranker is not
+malfunctioning, it is doing what a greedy per-viewer ranker with a global
+quality term must do. `random` beats it on host retention because `random`
+cannot concentrate. That is not `random` being good; it is concentration being
+expensive enough to outweigh being 2.7x better at picking cards.
+
+Three things follow.
+
+1. **Deck relevance goes UP as the funnel comes off** (0.094 → 0.128). The funnel
+   is not trading relevance for fairness. It is *displacing cards the hidden
+   model wants* and concentrating attention while doing it. v1.6 §G3 measured
+   the same displacement (26%) and attributed it to "diversity caps, explore,
+   the fresh-host slot and the funnel decomposition" collectively. It is the
+   funnel.
+2. **Repeat rate moves the other way** (0.460 → 0.408), which is the one thing
+   the funnel buys. `R_repeat` is explicitly a bet on recurrence and it wins
+   that bet. Under v1.6's metric the funnel looked defensible; under host
+   retention it is the most expensive thing in the system. The metric change
+   is doing real work here, not cosmetic work.
+3. This is **strong evidence** by the standing caveat: it is against the ranker,
+   it is monotone across five ablation steps and two population sizes, and the
+   mechanism is independently visible in the Gini rather than being inferred
+   from the outcome alone.
+
+**Not acted on.** `funnelExponent` remains 1 in `constants.ts` and reaches 0
+only through the ship gate. Turning the funnel off permanently is a decision to
+surface, not to take inside a diagnostic — and it should be taken against real
+`ranking_events` data, which is what this build exists to produce.
 
 ---
 
@@ -194,7 +285,127 @@ collapse to a scalar.
 **Command:**
 
 ```bash
-npm run sweep -- --proximity-sweep
+npm run sweep -- --proximity-sweep --seeds 1,2,3,4,5,6
 ```
 
-_Results below._
+### First, a correction to the harness
+
+The first run of this sweep, at three seeds, confidently reported three
+different optima at three densities (0.40, 0.10, 0.30) and concluded **"NO
+SINGLE VALUE WORKS: the optimum genuinely moves with density, so the scaled pair
+is earning its complexity."**
+
+That conclusion was wrong, and it was wrong in the most dangerous available way:
+it validated the existing design. Checking the noise floor before believing it —
+the same `w`, run against three *different* seed triples at N=150:
+
+| w | seeds 1-3 | seeds 4-6 | seeds 7-9 | spread |
+|---:|---:|---:|---:|---:|
+| 0.20 | 0.735 | 0.734 | 0.730 | 0.005 |
+| 0.40 | 0.710 | 0.754 | 0.735 | 0.044 |
+| 0.60 | 0.798 | 0.747 | 0.783 | 0.051 |
+
+The seed-to-seed spread at *fixed* `w` reaches 0.051. The entire across-`w`
+range was 0.108. **The optima were noise draws.** A maximum over fifteen noisy
+points is not an optimum, and a sweep that reports one as a finding is worse
+than a sweep that reports nothing.
+
+`Aggregate` now carries the standard error across seeds, and the verdict is
+gated: an optimum must clear the median by two standard errors or the harness
+prints `OPTIMUM UNIDENTIFIABLE` and says how many more seeds it would take. The
+numbers below are six seeds, through the gated verdict.
+
+### Observed
+
+Full table in [`proximity-sweep.md`](proximity-sweep.md); the two columns that matter:
+
+| w_proximity | N=40 ret | N=150 ret | N=600 ret | N=40 repeat | N=150 repeat | N=600 repeat |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.10 | 0.771 | 0.782 | 0.746 | 0.485 | 0.421 | 0.427 |
+| 0.20 | 0.840 | 0.735 | 0.756 | 0.519 | 0.444 | 0.452 |
+| 0.30 | 0.762 | 0.755 | 0.768 | 0.519 | 0.449 | 0.455 |
+| 0.40 | 0.847 | 0.732 | 0.740 | 0.489 | 0.448 | 0.486 |
+| 0.50 | 0.769 | 0.777 | 0.745 | 0.535 | 0.481 | 0.494 |
+| 0.60 | 0.787 | 0.772 | 0.756 | 0.531 | 0.494 | 0.523 |
+| 0.70 | 0.818 | 0.722 | 0.752 | 0.521 | 0.520 | 0.536 |
+| 0.80 | 0.821 | 0.742 | 0.741 | 0.541 | 0.526 | 0.536 |
+
+Gated verdict:
+
+```
+N=40:  OPTIMUM UNIDENTIFIABLE on retention. Best w=0.40 at 0.847, only 0.048
+       above the median against a seed noise of +/-0.038.
+N=150: optimum w_proximity 0.10 (0.782, 0.040 above median, noise +/-0.020)
+N=600: optimum w_proximity 0.30 (0.768, 0.016 above median, noise +/-0.007)
+
+repeat rate rises at  9/14 steps at N=40   (0.485 -> 0.541)
+                      9/14 steps at N=150  (0.421 -> 0.526)
+                     12/14 steps at N=600  (0.427 -> 0.536)
+```
+
+**Held: no — and the scaled pair should collapse.**
+
+Three findings, in order of confidence.
+
+**1. On the primary metric, `w_proximity` barely matters.** Retention is flat in
+`w` to within noise across the whole 0.10–0.80 range at all three densities. The
+two "optima" that clear the two-standard-error bar do so by 0.040 and 0.016 and
+point in opposite directions. This is consistent with §D3: what determines host
+retention is the funnel's concentration, not how much of P_join goes to
+proximity. The lever v1.6 §G6 ranked first is not the lever.
+
+**2. On repeat rate the signal is clean, monotone, and unfinished.** It rises
+across the sweep at every density and is *still rising at 0.80*, the top of the
+range. There is no interior optimum in [0.10, 0.80]. "More proximity is better
+on repeat rate" — the v1.6 finding — reproduces, and extends further than that
+sweep looked.
+
+**3. The scaled pair's direction is contradicted, so the pair should collapse to
+a scalar.** v1.6 declares `{village 0.40, city 0.20}` — *less* proximity at high
+density, on the theory that selection matters more when there is more to select
+from. But the repeat-rate gain from raising proximity is **largest at N=600**
+(+0.109 from 0.10 to 0.80) and smallest at N=40 (+0.056). The city column should
+be higher than the village one, not half of it.
+
+And since retention is flat in `w` while repeat rate wants `w` maximal at every
+density, **there is no density at which a lower proximity weight wins.** A
+two-column table whose columns both want to move the same way, to the same
+place, is not modelling a real interaction. It should be one number.
+
+**Not acted on.** `pJoin.proximity` is untouched. Collapsing a scaled pair is a
+structural change to the v1.6 architecture, and the evidence for where to set
+the resulting scalar runs off the edge of the swept range — which means the next
+experiment is a wider sweep, not an edit. Both are decisions to surface.
+
+---
+
+## What this build did NOT do
+
+Did not tune. `constants.ts` contains the same numbers it did before the
+diagnostics ran, with three exceptions, all of which are documented behaviour
+changes rather than tuning and all of which were committed **before** any
+diagnostic was run:
+
+- `exhaustionRate` to zero (§3.1), on the stated principle that a term gated on
+  data that does not exist should not be live
+- `maxPerCategory` / `maxPerHost` replaced by `categoryPenalty` / `hostPenalty`
+  (§3.2), which is a specification fix
+- `funnelExponent` added, defaulting to 1 — the ship gate moves it, the
+  diagnostics move it, nothing tuned it
+
+Every diagnostic configuration went through `RankOptions.paramsOverride`, so
+none of them touched a constant.
+
+### One harness change, disclosed
+
+`scripts/sweep.ts` replaced a linear `world.posts.find()` per card with a
+`Map` lookup. Purely a performance fix — `population.ts`, the frozen model, is
+untouched, and `regime_adaptive` at N=300 reproduces its pre-change row byte for
+byte (0.824 / 0.768 / 0.460 / 12.814 / 39.2% / 18.9% / 0.884 / 0.094).
+
+It is disclosed because it mattered: the scan was quadratic in run length, and
+it bit hardest exactly where the interesting configurations lived — an arm that
+completes more tandems triggers more supply response, creates more posts, and
+makes every subsequent lookup slower. **The best-performing ablations were the
+slowest to run**, which is a bad property for a diagnostic harness and had
+already caused two ablations to be abandoned for time before it was fixed.

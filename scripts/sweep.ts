@@ -172,6 +172,8 @@ interface Options {
    */
   funnelExponent: number | null;
   demandWeight: number | null;
+  /** Restrict to a subset of arms. An ablation rarely needs all five. */
+  arms: Arm[];
 }
 
 function parseArgs(): Options {
@@ -199,6 +201,13 @@ function parseArgs(): Options {
       ? null : Number(flag('--funnel-exponent')),
     demandWeight: flag('--demand-weight') === null
       ? null : Number(flag('--demand-weight')),
+    arms: (() => {
+      const raw = flag('--arms');
+      if (!raw) return ARMS;
+      const wanted = new Set(raw.split(',').map((x) => x.trim()));
+      const picked = ARMS.filter((a) => wanted.has(a));
+      return picked.length > 0 ? picked : ARMS;
+    })(),
   };
 }
 
@@ -420,13 +429,33 @@ function runOne(arm: Arm, users: number, seed: number, opts: Options): Result {
   const coverageSamples: number[] = [];
   const regimeSamples: number[] = [];
 
+  /**
+   * Post lookup by id.
+   *
+   * This used to be `world.posts.find(...)` per card, which is a linear scan
+   * over every post ever created. It is quadratic in the run length and it bites
+   * exactly where the interesting configurations live: an arm that completes
+   * more tandems triggers more supply response, which creates more posts, which
+   * makes every subsequent lookup slower. The ablations that produced the best
+   * results were the slowest to run, which is a bad property for a diagnostic
+   * harness to have.
+   *
+   * Purely a harness change. `population.ts` — the FROZEN model — is untouched,
+   * and the arm reproduces its previous numbers exactly (asserted by re-running
+   * regime_adaptive at funnelExponent 1 and matching the main sweep row).
+   */
+  const postById = new Map<string, Post>();
+
   for (let day = 0; day < opts.days; day++) {
     const now = START + day * DAY;
 
     if (day % 7 === 0) world.weeklyImpressions.clear();
 
     for (const person of people) {
-      if (postsToday(person, rng)) createPost(world, person, now, rng);
+      if (postsToday(person, rng)) {
+        const post = createPost(world, person, now, rng);
+        postById.set(post.id, post);
+      }
     }
 
     for (const person of people) {
@@ -485,7 +514,7 @@ function runOne(arm: Arm, users: number, seed: number, opts: Options): Result {
       for (let i = 0; i < deck.length; i++) {
         const card = deck[i] as Candidate;
         const host = byId.get(card.hostId) as Person;
-        const post = world.posts.find((p) => p.id === card.activityId);
+        const post = postById.get(card.activityId);
         if (!post || post.settled) continue;
 
         impressions += 1;
@@ -553,6 +582,26 @@ function mean(xs: number[]): number {
 
 interface Aggregate extends Omit<Result, 'seed'> {
   seeds: number;
+  /**
+   * Standard error of the mean across seeds, for the two headline metrics.
+   *
+   * Without this a sweep will happily report an "optimum" that is the largest
+   * of fifteen noise draws. The §4.4 proximity sweep did exactly that on its
+   * first run — it named three different optima at three densities, all of them
+   * inside the seed-to-seed spread, and announced that the scaled pair was
+   * therefore justified. It is not enough to compute a maximum; you have to know
+   * whether the maximum means anything.
+   */
+  retentionAfterEmptySe: number;
+  repeatRateSe: number;
+}
+
+/** Standard error of the mean. Returns 0 for fewer than two samples. */
+function stderr(xs: number[]): number {
+  if (xs.length < 2) return 0;
+  const m = mean(xs);
+  const variance = xs.reduce((a, x) => a + (x - m) ** 2, 0) / (xs.length - 1);
+  return Math.sqrt(variance / xs.length);
 }
 
 function aggregate(results: Result[]): Aggregate {
@@ -579,6 +628,8 @@ function aggregate(results: Result[]): Aggregate {
     deckRelevance: avg((r) => r.deckRelevance),
     meanCoverage: avg((r) => r.meanCoverage),
     meanRegime: avg((r) => r.meanRegime),
+    retentionAfterEmptySe: stderr(results.map((r) => r.retentionAfterEmpty)),
+    repeatRateSe: stderr(results.map((r) => r.repeatRate)),
   };
 }
 
@@ -692,40 +743,52 @@ async function proximitySweep(opts: Options): Promise<void> {
 
   console.log(`\n${table.join('\n')}\n`);
 
-  // Per-density optimum, and whether one value would do for all of them.
-  const optima: { users: number; w: number; value: number }[] = [];
-  for (const users of sizes) {
-    let best = { users, w: weights[0] as number, value: -Infinity };
-    for (const w of weights) {
-      const agg = grid.get(`${w}|${users}`);
-      if (agg && agg.retentionAfterEmpty > best.value) {
-        best = { users, w, value: agg.retentionAfterEmpty };
-      }
-    }
-    optima.push(best);
-    console.log(`optimum at N=${users}: w_proximity ${best.w.toFixed(2)} (retention ${n3(best.value)})`);
-  }
-
-  // Is a single value near-optimal everywhere? "Near" = within 2% relative of
-  // that density's best, which is inside the seed-to-seed noise at these sizes.
-  const TOLERANCE = 0.02;
-  const universal = weights.filter((w) => optima.every((o) => {
-    const agg = grid.get(`${w}|${o.users}`);
-    return agg !== undefined && agg.retentionAfterEmpty >= o.value * (1 - TOLERANCE);
-  }));
+  // -------------------------------------------------------------------------
+  // The verdict, gated on the noise floor.
+  //
+  // A maximum over fifteen noisy draws is not an optimum. Before naming one,
+  // check that the spread across w is large relative to the seed-to-seed spread
+  // at fixed w — and if it is not, say the optimum is UNIDENTIFIABLE rather than
+  // reporting the largest noise draw as a finding.
+  // -------------------------------------------------------------------------
+  const NOISE_MULTIPLE = 2;   // best must clear the median by 2 standard errors
 
   console.log('');
-  if (universal.length > 0) {
+  for (const users of sizes) {
+    const cells = weights
+      .map((w) => ({ w, agg: grid.get(`${w}|${users}`) }))
+      .filter((x): x is { w: number; agg: Aggregate } => x.agg !== undefined);
+    if (cells.length === 0) continue;
+
+    const values = cells.map((c) => c.agg.retentionAfterEmpty).sort((a, b) => a - b);
+    const median = values[Math.floor(values.length / 2)] as number;
+    const best = cells.reduce((a, b) =>
+      b.agg.retentionAfterEmpty > a.agg.retentionAfterEmpty ? b : a);
+    const noise = mean(cells.map((c) => c.agg.retentionAfterEmptySe));
+    const margin = best.agg.retentionAfterEmpty - median;
+
+    if (margin > NOISE_MULTIPLE * noise) {
+      console.log(
+        `N=${users}: optimum w_proximity ${best.w.toFixed(2)} ` +
+        `(${n3(best.agg.retentionAfterEmpty)}, ${n3(margin)} above median, ` +
+        `noise +/-${n3(noise)})`,
+      );
+    } else {
+      console.log(
+        `N=${users}: OPTIMUM UNIDENTIFIABLE on retention. Best is w=${best.w.toFixed(2)} ` +
+        `at ${n3(best.agg.retentionAfterEmpty)}, only ${n3(margin)} above the median ` +
+        `against a seed noise of +/-${n3(noise)}. More seeds, or a different metric.`,
+      );
+    }
+
+    // Monotonicity on repeat rate is checkable even when point estimates are
+    // noisy: fifteen points trending one way is not fifteen coin flips.
+    const repeats = cells.map((c) => c.agg.repeatRate);
+    const rises = repeats.slice(1).filter((v, i) => v > (repeats[i] as number)).length;
     console.log(
-      `A SINGLE VALUE WORKS: w_proximity in [${universal.map((w) => w.toFixed(2)).join(', ')}] ` +
-      `is within ${TOLERANCE * 100}% of optimal at every density tested.`,
-    );
-    console.log('The scaled {village, city} pair for proximity is complexity with no payoff.');
-    console.log('It should collapse to a scalar.');
-  } else {
-    console.log(
-      'NO SINGLE VALUE WORKS: the optimum genuinely moves with density, ' +
-      'so the scaled pair is earning its complexity.',
+      `           repeat rate rises at ${rises}/${repeats.length - 1} steps ` +
+      `(${n3(repeats[0] as number)} at w=${weights[0]?.toFixed(2)} -> ` +
+      `${n3(repeats[repeats.length - 1] as number)} at w=${weights[weights.length - 1]?.toFixed(2)})`,
     );
   }
 
@@ -753,13 +816,13 @@ async function main(): Promise<void> {
   if (opts.exhaustionOn) console.log('  §4.2 COUNTERFACTUAL: exhaustion re-enabled at v1.6 rates');
   if (opts.proximityWeight !== null) console.log(`  w_proximity forced to ${opts.proximityWeight}`);
   console.log('');
-  for (const arm of ARMS) console.log(`  ${arm.padEnd(19)} ${ARM_NOTES[arm]}`);
+  for (const arm of opts.arms) console.log(`  ${arm.padEnd(19)} ${ARM_NOTES[arm]}`);
   console.log('');
 
   const aggregates: Aggregate[] = [];
 
   for (const users of opts.sizes) {
-    for (const arm of ARMS) {
+    for (const arm of opts.arms) {
       const runs = opts.seeds.map((seed) => runOne(arm, users, seed, opts));
       aggregates.push(aggregate(runs));
     }
