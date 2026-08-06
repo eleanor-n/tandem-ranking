@@ -83,6 +83,7 @@ function selectDeck(
   while (chosen.length < deckSize && taken.size < scored.length) {
     let bestIndex = -1;
     let bestScore = -Infinity;
+    let bestGated = true;
 
     for (let i = 0; i < scored.length; i++) {
       if (taken.has(i)) continue;
@@ -93,9 +94,19 @@ function selectDeck(
         params.categoryPenalty,
         params.hostPenalty,
       );
-      // Strict >, so the first of equal candidates wins and the incoming total
-      // order is preserved.
-      if (adjusted > bestScore) { bestScore = adjusted; bestIndex = i; }
+
+      // The completion gate (v1.8 §1.3) is an ordering key and has to survive
+      // this loop. Without the lexicographic comparison, a below-floor card
+      // could out-argmax an above-floor one on session-adjusted score and the
+      // gate scoring did upstream would be silently undone here.
+      const gated = sc.funnel.belowCompletionFloor;
+      const better = gated === bestGated
+        // Strict >, so the first of equal candidates wins and the incoming
+        // total order is preserved.
+        ? adjusted > bestScore
+        : !gated;
+
+      if (better) { bestScore = adjusted; bestIndex = i; bestGated = gated; }
     }
 
     if (bestIndex < 0) break;

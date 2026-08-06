@@ -66,10 +66,12 @@ export const RANKER_ENABLED = false;
  *                   draw, no reserved fresh-host slot.
  *   exploreEpsilon  zero. The epsilon swap is the one thing here that would be
  *                   visible to a user as unexplained randomness.
- *   funnelExponent  zero, so P_accept, P_complete and R_repeat each raise to
- *                   the identity. v1.6 §G3 measured these displacing nearer
- *                   cards at every density; until something says they pay for
- *                   themselves, they do not get to.
+ *   funnelExponent  zero, so P_accept and R_repeat raise to the identity.
+ *                   v1.6 §G3 measured these displacing nearer cards at every
+ *                   density; until something says they pay for themselves, they
+ *                   do not get to.
+ *   completionFloor zero, so the v1.8 §1.3 completion gate does not order
+ *                   anything to the tail.
  *
  * What is NOT switched off, and why:
  *
@@ -103,5 +105,8 @@ export function applyShipGate(params: ResolvedParams): ResolvedParams {
     quotas,
     exploreEpsilon: 0,
     funnelExponent: CONSTANTS.shipping.shelvedFunnelExponent,
+    // The completion gate is ranker machinery too. §3.3's shipping order is
+    // proximity x demand x session penalties and nothing else.
+    completionFloor: 0,
   };
 }

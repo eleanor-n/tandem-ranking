@@ -24,6 +24,7 @@ import {
   type TermName,
 } from '../src/ranking/core/classification.js';
 import {
+  GATE_TERMS,
   GLOBAL_QUALITY_MULTIPLIER_COUNT,
   MULTIPLICATIVE_LEAVES,
   PJOIN_SUMMANDS,
@@ -72,6 +73,18 @@ describe('the classification is total and honest', () => {
     expect(TERM_CLASS.hostReliability).toBe('global_quality');
   });
 
+  it('admits a global-quality term as a gate but not as a factor', () => {
+    // v1.8 §1.3. A sort key does not compound: it splits the deck into two
+    // blocks and orders within them. It cannot make a good host twice as
+    // visible on every card the way a multiplier can. So `completionPrior` and
+    // `freshness` stay `global_quality` and stay out of the product, while
+    // still reaching the deck.
+    for (const term of GATE_TERMS) {
+      expect(TERM_CLASS[term]).toBe('global_quality');
+      expect(MULTIPLICATIVE_LEAVES).not.toContain(term);
+    }
+  });
+
   it('separates global ALLOCATION from global QUALITY', () => {
     // "No global multipliers" would be too blunt a rule: it would ban the
     // impression floor and demand balancing, which are the only machinery that
@@ -94,18 +107,14 @@ describe('the guard fires on the current score', () => {
       (t) => TERM_CLASS[t] === 'global_quality',
     );
 
-    expect(offenders.sort()).toEqual([
-      'completionPrior',
-      'freshness',
-      'repeatableContext',
-    ]);
+    expect(offenders.sort()).toEqual(['repeatableContext']);
 
     expect(() => assertNoGlobalQualityMultipliers(MULTIPLICATIVE_LEAVES))
       .toThrow(/Global-quality terms used as raw score multipliers/);
   });
 
   it('pins the violation count so it can shrink but never grow', () => {
-    expect(GLOBAL_QUALITY_MULTIPLIER_COUNT).toBeLessThanOrEqual(3);
+    expect(GLOBAL_QUALITY_MULTIPLIER_COUNT).toBeLessThanOrEqual(1);
   });
 
   it('passes cleanly once the global-quality terms are gone', () => {
@@ -125,13 +134,15 @@ describe('the declared list matches the code', () => {
     const accessed = new Set(
       [...source.matchAll(/\bf\.(\w+)/g)].map((m) => m[1] as string),
     );
-    const known = new Set<string>([...MULTIPLICATIVE_LEAVES, ...PJOIN_SUMMANDS]);
+    const known = new Set<string>([
+      ...MULTIPLICATIVE_LEAVES, ...PJOIN_SUMMANDS, ...GATE_TERMS,
+    ]);
 
     for (const feature of accessed) {
       expect(
         known.has(feature),
-        `score.ts reads f.${feature}, which is in neither MULTIPLICATIVE_LEAVES ` +
-        'nor PJOIN_SUMMANDS. Classify it and declare where it enters the score.',
+        `score.ts reads f.${feature}, which is in none of MULTIPLICATIVE_LEAVES, ` +
+        'PJOIN_SUMMANDS or GATE_TERMS. Classify it and declare how it enters the deck.',
       ).toBe(true);
     }
   });

@@ -323,6 +323,13 @@ export interface ResolvedParams {
   demandWeight: number;
   /** sigma in S x (1 - sigma * overflow) — already-full penalty (§2.2). */
   overflowPenalty: number;
+  /**
+   * P_complete below this sorts a card to the tail (v1.8 §1.3). Zero disables
+   * the gate entirely, which is what the ship gate does — a completion floor is
+   * ranker machinery and the shipped order is proximity x demand x session
+   * penalties.
+   */
+  completionFloor: number;
   /** Rate in exhaustion = 1 - exp(-rate * completedTogether) (§3). */
   exhaustionRate: number;
   /** beta in salience = interest x (1 + beta * novelty) (§1.4). */
@@ -373,6 +380,15 @@ export interface FunnelScore {
   overflow: number;
   /** How worn out this viewer/host pairing is, in [0, 1] (§3). */
   exhaustion: number;
+  /**
+   * True when P_complete fell below `completionFloor` (v1.8 §1.3).
+   *
+   * An ORDERING key, not a filter: these cards sort to the tail of the deck and
+   * remain reachable. Carried on the score rather than folded into it because
+   * folding it in would make it a multiplier again — a global-quality one,
+   * which is the thing §1.3 exists to stop.
+   */
+  belowCompletionFloor: boolean;
 }
 
 export interface ScoredCandidate {

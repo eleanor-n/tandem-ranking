@@ -533,6 +533,26 @@ export const CONSTANTS = {
     },
 
     /**
+     * [v1.8 §1.3, UNMEASURED] The completion GATE.
+     *
+     * P_complete no longer multiplies the score. "Will this post actually
+     * happen" is a genuinely useful and genuinely global question, but it is
+     * FILTER-SHAPED — and a filter-shaped question asked as a multiplier
+     * compounds identically across every viewer, which is the §D3 defect
+     * exactly.
+     *
+     * So: posts scoring below this are ordered to the TAIL of the deck. Not
+     * removed. The framework's absolute rule is that the score orders and never
+     * filters, and a low-completion post stays reachable — it is simply last.
+     * `tests/gate.test.ts` asserts that no value of this constant, including 1,
+     * can produce an empty or short deck.
+     *
+     * 0.25 is low on purpose. This is meant to catch the host who has flaked
+     * four times running, not to express a preference between a 0.6 and a 0.7.
+     */
+    completionFloor: 0.25,
+
+    /**
      * [v1] R_repeat = 1 + a*repeatableContext + b*rhythmOverlap, range 1.0–1.5.
      * This is a multiplier, not a probability: it says "this pairing could
      * become a habit", which is the business. Raising these tilts the deck

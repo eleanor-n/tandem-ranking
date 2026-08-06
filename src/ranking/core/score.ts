@@ -45,12 +45,25 @@ import type {
  */
 export const MULTIPLICATIVE_LEAVES: readonly TermName[] = [
   'acceptLikelihood',      // via pAccept — pairwise as of v1.8 §1.2
-  'completionPrior',       // via pComplete — global_quality, §1.3 converts to a gate
-  'freshness',             // via pComplete — global_quality, folded into the gate
   'repeatableContext',     // via rRepeat — global_quality, §1.4 dampens or drops
   'rhythmOverlap',         // via rRepeat — pairwise
   'exposureBoost',
   'demandMultiplier',
+];
+
+/**
+ * Terms that reach the deck as an ORDERING KEY rather than as a factor
+ * (v1.8 §1.3).
+ *
+ * A global-quality term is admissible this way because a sort key does not
+ * compound: it separates the deck into two blocks and orders within them. It
+ * cannot make a good host twice as visible on every card the way a multiplier
+ * can. Declared separately from the multiplicands so the distinction is visible
+ * rather than implied by absence.
+ */
+export const GATE_TERMS: readonly TermName[] = [
+  'completionPrior',       // via pComplete
+  'freshness',             // via pComplete
 ];
 
 /**
@@ -164,7 +177,11 @@ export function scoreFeatures(
   const c = pComplete(f);
   const r = rRepeat(f);
   const e = params.funnelExponent;
-  const base = j * Math.pow(a, e) * Math.pow(c, e) * Math.pow(r, e) * boost;
+
+  // P_complete is COMPUTED but no longer MULTIPLIES (v1.8 §1.3). It is a gate;
+  // see `belowCompletionFloor` below and `compareScored`.
+  const base = j * Math.pow(a, e) * Math.pow(r, e) * boost;
+
   return {
     pJoin: j,
     pAccept: a,
@@ -174,8 +191,37 @@ export function scoreFeatures(
     urgency: demand.urgency,
     overflow: demand.overflow,
     exhaustion: demand.exhaustion,
+    // Strictly below, so a floor of 0 gates nothing — which is what the ship
+    // gate relies on.
+    belowCompletionFloor: c < params.completionFloor,
     score: base * demand.multiplier,
   };
+}
+
+/**
+ * The deck's total order.
+ *
+ *   1. above the completion floor, before below it
+ *   2. score, descending
+ *   3. activityId, so the order is total and reproducible
+ *
+ * The gate is a SORT KEY, never a filter. A post from a host who has flaked
+ * four times running goes last; it does not disappear. That is the framework's
+ * absolute rule — the score orders, time pills filter, an empty deck is a bug.
+ *
+ * Expressing it as a key rather than as a multiplier is also what keeps it out
+ * of the §D3 defect. A "gate" written as `score *= 0.001` would be a
+ * global-quality multiplier wearing a gate's clothes: it would compound
+ * identically for every viewer, which is the exact property being repaired.
+ */
+export function compareScored(a: ScoredCandidate, b: ScoredCandidate): number {
+  if (a.funnel.belowCompletionFloor !== b.funnel.belowCompletionFloor) {
+    return a.funnel.belowCompletionFloor ? 1 : -1;
+  }
+  return (
+    b.funnel.score - a.funnel.score ||
+    a.candidate.activityId.localeCompare(b.candidate.activityId)
+  );
 }
 
 /** Median impressions across the candidate pool, for the impression floor. */
@@ -188,8 +234,9 @@ export function peerMedianImpressions(candidates: readonly Candidate[]): number 
 }
 
 /**
- * Score a whole pool. Sorted descending, ties broken by activityId so the
- * output is a total order and therefore reproducible.
+ * Score a whole pool, in the order `compareScored` defines: above the
+ * completion gate first, then by score, then by id so the result is a total
+ * order and therefore reproducible.
  */
 export function scoreCandidates(
   viewer: Viewer,
@@ -215,11 +262,7 @@ export function scoreCandidates(
     return { candidate, features, funnel };
   });
 
-  return scored.sort(
-    (a, b) =>
-      b.funnel.score - a.funnel.score ||
-      a.candidate.activityId.localeCompare(b.candidate.activityId),
-  );
+  return scored.sort(compareScored);
 }
 
 /**
