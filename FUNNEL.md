@@ -4,10 +4,18 @@ The v1.8 repair of the defect v1.7 §D3 measured, and what the measurement says
 about it.
 
 **Headline, up front: the repair works in shape and fails at its shipped
-setting.** At ρ = 0.5 the host-attention Gini is 0.821, above the ~0.75 bar set
-for "the repair failed and the terms should be dropped rather than repaired".
-The dose–response says why, and points at a specific configuration that is not
-"drop it" and not "keep it as shipped". Details in §4.
+setting — and it fails harder than the Gini bar alone conveys.**
+
+At ρ = 0.5 the host-attention Gini is 0.821, above the ~0.75 bar set for "the
+repair failed and the terms should be dropped rather than repaired". Worse:
+**`ranker_repaired` still loses to `random` on host retention at every N ≥ 150**,
+which was the v1.7 §D3 guard condition. At N=600 it is the *worst of the five
+arms* on the primary metric, below `random`.
+
+The dose–response says why, and points at a configuration that is neither "drop
+it" nor "keep it as shipped". At ρ = 0 the same ranker beats `random`
+comfortably (0.922 vs 0.865 at N=300). **The entire residual failure is
+attributable to the host term surviving as a main effect.** Details in §4.
 
 Nothing here has been tuned. Every number came from `RankOptions.paramsOverride`
 and every constant is where it was before the diagnostics ran.
@@ -221,12 +229,13 @@ model's source weights — not as a rounding error on a multiplier.
 > *"The repaired funnel should recover most of the relevance gain that removing
 > the global terms produced (0.094 → 0.128) without the Gini blowup."*
 
-| configuration | Gini | deck relevance |
-|---|---:|---:|
-| v1.7 funnel, unrepaired *(from §D3, N=300)* | 0.884 | 0.094 |
-| **v1.8 repaired, ρ = 0.5** | **0.821** | **0.104** |
-| v1.8 repaired, ρ = 0 | 0.511 | 0.117 |
-| no funnel at all *(§D3 ablation, N=300)* | 0.484 | 0.128 |
+| configuration | Gini | deck relevance | retention | beats `random`? |
+|---|---:|---:|---:|---|
+| v1.7 funnel, unrepaired *(from §D3, N=300)* | 0.884 | 0.094 | 0.824 | ❌ |
+| **v1.8 repaired, ρ = 0.5** | **0.821** | **0.104** | **0.848** | ❌ |
+| v1.8 repaired, ρ = 0 | 0.511 | 0.117 | 0.922 | ✅ |
+| no funnel at all *(ablation, N=300)* | 0.475 | 0.127 | 0.933 | ✅ |
+| `random` *(the floor)* | 0.643 | 0.056 | 0.865 | — |
 
 At the shipped setting the repair recovers **29% of the relevance gain** (0.094
 → 0.104 of a possible 0.094 → 0.128) and **19% of the Gini reduction** (0.884 →
@@ -236,6 +245,12 @@ behind the §4 verdict.
 At ρ = 0 it recovers **68% of the relevance** and **93% of the Gini**, which is
 close enough to the no-funnel ablation to say that what remains of the funnel at
 that setting is nearly free.
+
+The `beats random?` column is the one that matters most. Crossing from ❌ to ✅
+happens between ρ = 0.5 and ρ = 0, and nothing else about the configuration
+changes across that boundary — same features, same weights, same gate, same
+pickiness interaction. **The host term surviving as a main effect is the whole
+of the remaining failure.**
 
 ---
 

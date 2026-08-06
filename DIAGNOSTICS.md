@@ -457,6 +457,120 @@ Two side effects worth noting:
 
 ---
 
+# v1.8 — Funnel repair
+
+Same rules. Every configuration through `paramsOverride`, nothing tuned, and the
+standing caveat unchanged: **results favouring the ranker are weak evidence,
+results against it are strong.** Everything decisive below is against it.
+
+## E1 — All arms, all N, six seeds (§3.2)
+
+```bash
+npm run sweep -- --seeds 1,2,3,4,5,6 --md sweep-v18.md --csv sweep-v18.csv
+```
+
+Host retention, the primary metric:
+
+| N | shipped | ranker_repaired | ranker_no_funnel | proximity_only | random |
+|---:|---:|---:|---:|---:|---:|
+| 20 | 0.833 | 0.825 | 0.800 | **0.875** | 0.833 |
+| 40 | 0.883 | 0.858 | 0.892 | **0.900** | 0.854 |
+| 80 | 0.910 | 0.871 | 0.894 | **0.927** | 0.871 |
+| 150 | **0.930** | 0.856 | 0.920 | 0.909 | 0.868 |
+| 300 | **0.944** | 0.848 | 0.933 | 0.925 | 0.865 |
+| 600 | **0.957** | 0.838 | 0.946 | 0.930 | 0.860 |
+
+Host-attention Gini, the mechanism:
+
+| N | shipped | ranker_repaired | ranker_no_funnel | proximity_only | random |
+|---:|---:|---:|---:|---:|---:|
+| 150 | **0.508** | 0.789 | 0.521 | 0.568 | 0.644 |
+| 300 | **0.470** | 0.821 | 0.475 | 0.541 | 0.643 |
+| 600 | **0.409** | 0.842 | 0.429 | 0.532 | 0.649 |
+
+**`ranker_repaired` is the worst arm on the primary metric at N ≥ 150, and at
+N=600 it is the worst of all five — below `random`.**
+
+Three things follow.
+
+1. **The repair did not clear the §D3 guard.** It reduced Gini from 0.884 to
+   0.821 at N=300, which is a real improvement, and it is nowhere near enough.
+2. **`ranker_no_funnel` is now within a whisker of `shipped`** (0.946 vs 0.957
+   retention at N=600; Gini 0.429 vs 0.409). Removing the funnel entirely gets
+   almost all of the shipped configuration's benefit.
+3. **`shipped` is the best arm on retention at every N ≥ 150** and on every
+   liquidity metric at every size — 9.4% zero-joiner posts at N=600 against
+   `proximity_only`'s 20.2% and `ranker_repaired`'s 33.5%. The v1.7 conclusion
+   holds under the v1.8 code.
+
+`proximity_only` still wins repeat rate everywhere (0.655 at N=600), which
+also holds from v1.7 and remains a property of a pool-shrinking algorithm
+scoring well on a ratio.
+
+## E2 — The `random` guard, again (§4.3 rule)
+
+The sweep fired `BUG SUSPECTED` four times. Investigated before reporting
+anything else, as the standing rule requires.
+
+**Not a new bug. The same design failure, incompletely repaired**, and the ρ
+sweep quantifies exactly how much of it is left.
+
+The v1.7 §D3 mechanism was: viewer-independent quality terms in a per-viewer
+product create global consensus, attention concentrates, hosts churn. §1.2
+reduced the magnitude of that consensus (rank-normalisation, damping) and added
+a genuinely pairwise interaction (pickiness), but `hostRank^0.5` is still a
+substantial **main effect** — and a dampened global consensus is still a global
+consensus.
+
+The decisive evidence that this is the whole explanation:
+
+| configuration | retention (N=300) | Gini | vs `random` (0.865) |
+|---|---:|---:|---|
+| ρ = 0.5 *(shipped repair)* | 0.848 | 0.821 | ❌ loses |
+| ρ = 0 *(host main effect removed)* | 0.922 | 0.511 | ✅ wins by 0.057 |
+
+Nothing else differs across that boundary — same features, same weights, same
+gate, same pickiness interaction. **The host term surviving as a main effect is
+the entirety of the residual failure.**
+
+Also worth noting: `ranker_no_funnel` loses to `random` at N=20 (0.800 vs
+0.833). That one *is* noise — coverage is 0.515, the pool is ~10 posts against a
+deck of 8, so every arm shows nearly everything and the arms are not
+distinguishable at that size. It does not reproduce at any larger N.
+
+## E3 — ρ dose–response (§3.3)
+
+Full table and analysis in [`FUNNEL.md`](FUNNEL.md) §4. Monotone on five metrics
+at N=300, six seeds, every one favouring ρ = 0; repeat rate the lone dissenter,
+peaking at ρ = 0.75.
+
+## E4 — `repeatableContext`, kept vs dropped (§3.4)
+
+| weight | retention | repeat rate | zero-joiner | Gini | relevance |
+|---|---:|---:|---:|---:|---:|
+| 0.25 *(kept)* | 0.848 | 0.474 | 32.9% | 0.821 | 0.104 |
+| 0.00 *(dropped)* | 0.855 | 0.471 | 32.2% | 0.817 | 0.104 |
+
+Indistinguishable. **Recommendation: drop it**, which empties
+`DAMPENED_MULTIPLICANDS` and removes the one route to the deck whose safety
+argument is "less of a bad thing" rather than "not a bad thing".
+[`FUNNEL.md`](FUNNEL.md) §5 records what is being given up.
+
+## E5 — The two dropped ablations (§3.1)
+
+v1.7 abandoned two ablations for time. The reason mattered: the harness scan was
+quadratic in run length, an arm that completes more tandems creates more posts
+through supply response, so **the best-performing configurations were the
+slowest to measure** — a harness whose cost correlates with the result selects
+which results get collected.
+
+Re-run on the fixed harness at N=600, six seeds. **It did not turn out to
+matter**: neither abandoned ablation changes a conclusion. Both are recorded
+because "we checked and it was fine" is worth exactly as much as the original
+worry.
+
+---
+
 ## What this build did NOT do
 
 Did not tune. `constants.ts` contains the same numbers it did before the
