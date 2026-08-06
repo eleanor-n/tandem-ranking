@@ -175,18 +175,53 @@ configuration the data points at is:
 
 Which is exactly what §3's classification predicts. A main effect of a
 host-only quantity is global-quality. An interaction between a host-only
-quantity and a viewer-dependent one is pairwise. The repair's *shape* was right
-— the pickiness factor is what earned the reclassification, and it survives at
-ρ = 0. Its *magnitude* was wrong, and the correct magnitude is zero.
+quantity and a viewer-dependent one is pairwise.
 
-That is a more useful answer than "drop the terms", because it says which half
-to drop.
+> ### ⚠️ v1.9 CORRECTION — the paragraph above is half wrong
+>
+> The interaction does **not** fully survive at ρ = 0, and I did not check
+> before writing that it did. `tests/accept.test.ts` caught it when the abort
+> was executed and the assertions failed.
+>
+> ```
+> P_accept = clamp01( rank^ρ × (1 + pickiness × deviation) )
+> ```
+>
+> At ρ = 0 the first factor is exactly **1** — the ceiling. So any *positive*
+> viewer deviation multiplies 1 by something greater than 1 and is clipped
+> straight back to 1 by `clamp01`. Measured:
+>
+> | | raw | after clamp |
+> |---|---:|---:|
+> | ρ=0, category-matching viewer | 1.180 | **1.000** |
+> | ρ=0, neutral viewer | 1.000 | **1.000** |
+> | ρ=0.25, category-matching | 0.664 | 0.664 |
+> | ρ=0.25, neutral | 0.562 | 0.562 |
+>
+> So ρ = 0 keeps the interaction **only on the downside**. It can penalise a
+> poor record; it cannot reward a good one, and every above-neutral viewer is
+> indistinguishable from every other for every host. The classification's
+> prediction is *directionally* vindicated — the main effect was the harmful
+> part — but the claim that the pairwise half "survives at ρ = 0" is false as
+> stated, and it was the more flattering of the two readings.
+>
+> **Left at 0 regardless**, because 0 is the value the sweep *measured*: the
+> clipping was inside the arm that scored 0.922 retention. Removing the clip
+> would be a new functional form with no measurement behind it, introduced
+> under an abort. Whether the un-clipped form beats this one is **UNMEASURED**
+> and is §8's first item.
 
-**Not acted on.** `hostAcceptDamping` remains 0.5 in `constants.ts`. Changing it
-would be tuning a constant to improve a metric, which this build is explicitly
-not doing, and the change should be made against real `ranking_events` labels
-rather than against a simulator that was authored alongside the ranker it
-grades.
+**Acted on as of v1.9.** `hostAcceptDamping` is now `0`. This is not tuning: it
+is the pre-committed response to a pre-registered criterion that fired at
+0.842 ±0.002 against a 0.75 threshold. The distinction that matters — and the
+discipline only survives if it is stated — is that a parameter moved because a
+*rule agreed in advance* said to move it, not because moving it improved a
+number. `repeatableContextWeight` is `0` on the same basis: §1.4 pre-committed
+to running it both ways, §3.4 ran it, and nothing separated.
+
+What is still **not** acted on is `demandWeight`, which has no pre-registration
+behind it and is the parameter most contaminated by the population model. See
+§7.
 
 ---
 
@@ -270,6 +305,39 @@ The one result that would favour the ranker — repeat rate peaking at ρ = 0.75
 is the weak-evidence direction and is also a single metric moving against five
 others. It is reported, and it is not the basis for anything.
 
+### ⚠️ v1.9 — the strongest caveat is the one about `demandWeight`
+
+Every table above reports a simulator number. Two of them are load-bearing in a
+way the rest are not, and the difference is worth being precise about.
+
+The Gini and dose–response results are **structural**: they follow from the
+arithmetic of a per-viewer product containing a viewer-independent factor, and
+they would come out the same under a wide range of population assumptions.
+Concentration is manufactured by the score, not by the model of how people
+respond to it.
+
+The **magnitude** of ablation C's win is not structural. It is close to a
+mechanical restatement of one authored constant:
+
+```
+population.ts:  churnPerEmptyPost   0.18     ← invented
+                churnCompounding    1.6      ← invented
+```
+
+`demandWeight` boosts under-filled posts. The benefit of doing so is the churn
+it averts. The churn it averts is `churnPerEmptyPost`. Sweeping `demandWeight`
+against this population model is therefore close to asking the model to restate
+its own assumption back as a finding, and "5× the shipped weight is best" should
+be read in exactly that light.
+
+What *is* robust is the **direction**: demand balancing helped in every
+configuration tested, across funnel-on and funnel-off arms. That is a much
+weaker claim and it rests on much less.
+
+`supabase/analysis/churn-on-empty.sql` measures the constant. Until it returns
+something, `demandWeight` should move modestly if at all, and 0.5 is a
+hypothesis rather than a setting.
+
 One caveat specific to v1.8: **the pre-repair funnel is not reachable through
 `paramsOverride`.** §1.3 removed `P_complete` from the product structurally and
 §1.2 rewrote `P_accept`'s shape, so no parameter setting reconstructs v1.7's
@@ -286,12 +354,34 @@ work rather than an aside.
 The whole of the above is simulation. The instrumentation shipped in v1.7 exists
 precisely so that these questions stop needing a simulator:
 
-1. **Fit `P_accept` from real labels.** `ranking_events` records every feature at
+0. **Re-run ρ against an un-clipped `P_accept`.** *(v1.9, new, and first because
+   it is cheap and it is a known defect rather than an open question.)* At ρ = 0
+   the term pins at the ceiling and the upside interaction is clipped away — see
+   the correction in §4. The dose–response therefore compared "ρ = 0.5 with a
+   working two-sided term" against "ρ = 0 with a one-sided one", and attributed
+   the whole difference to ρ. Give the deviation factor headroom below 1 — e.g.
+   normalise by `1 + pickiness × deviationCeiling` so the maximum is attainable
+   rather than clipped — and re-run. If ρ = 0 still wins, the finding is clean.
+   If it does not, the abort was right about the main effect and wrong about the
+   magnitude, and that is worth knowing before any of this reaches a fit.
+1. **Measure `churnPerEmptyPost`.** `supabase/analysis/churn-on-empty.sql`. It
+   is the single load-bearing assumption behind every demand-balancing number
+   here, it is currently invented, and it is measurable *today* on live data —
+   noisily, but empirically. Read the Wilson interval, not the point estimate.
+2. **Fit `P_accept` from real labels.** `ranking_events` records every feature at
    impression time plus the `accept`/`decline` outcome. One logistic regression
    answers whether `hostReliability` predicts acceptance at all once viewer
    reputation and category familiarity are in the model — which is the question
    ρ is a proxy for.
-2. **Watch the production Gini.** `supabase/analysis/concentration.sql`, leading
+3. **Watch the production Gini.** `supabase/analysis/concentration.sql`, leading
    with the zero-impression host count. The simulator's absolute values do not
    transfer; the *ordering* of the configurations should.
-3. **Then set ρ.** From the fit, not from this table.
+4. **Then set ρ.** From the fit, not from this table.
+
+> **Sequencing note.** Items 2–4 need `ranking_events` to fill up, and the
+> instrumentation must not start filling it until the `loadCandidates` spatial
+> bug is fixed and deployed (PERF.md §1, fixed in v1.9). Impressions logged from
+> a candidate set selected by *time* rather than *distance* carry no marker
+> distinguishing them from correct ones, so they would contaminate the training
+> data at the source — and the whole point of instrumentation-first is that this
+> data is the thing worth waiting a quarter for.

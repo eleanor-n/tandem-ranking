@@ -1,7 +1,31 @@
 # PERF
 
-Backend performance audit — v1.8 §5. **Read-only. Nothing in this file has been
-changed in code.**
+Backend performance audit — v1.8 §5. Written read-only; **§1, §2 and §4 were
+subsequently fixed in v1.9** on the reasoning below. The rest stands as audit.
+
+> ### v1.9 status
+>
+> | # | item | then | now |
+> |---|---|---|---|
+> | 1 | Spatial filtering | 🟥 correctness bug | ✅ fixed — `viewerBounds`, `SPATIAL_FILTER_UNBOUNDED` alarm, `activities_geo_idx` |
+> | 2 | `seenHostIds` unbounded | 🟥 | ✅ fixed — 90-day window, 5,000-row cap, covering index |
+> | 4 | Missing indexes | 🟧 | ✅ fixed — `20260807090000_ranking_v1_9_indexes.sql`, 7 indexes |
+> | 3, 5 | Interest cache, `ranking_events` growth | 🟧 | ⬜ open, still convenient-to-fix |
+> | 6–11 | | 🟩 | 🟩 unchanged, still fine |
+>
+> **Why §1 jumped the queue.** It was the only item in this audit that is a
+> *correctness* bug rather than a speed one, and it interacts with the
+> instrumentation plan: impressions logged from a candidate set selected by time
+> rather than distance carry no marker distinguishing them, so the first weeks of
+> `ranking_events` — the data the whole instrumentation-first strategy is waiting
+> a quarter to collect — would have been contaminated at the source. Logging a
+> broken candidate set is worse than logging nothing.
+>
+> **Also fixed, and not in the original audit:** the adapter had no tests. The
+> structural `SupabaseLike` type checks the shape of the query *builder* and
+> cannot check the shape of the *query*, which is precisely where §1 lived —
+> typechecks clean, runs fast, returns the wrong rows. `tests/adapter.test.ts`
+> now asserts queries rather than results.
 
 Baseline is the live database as recorded in [`SCHEMA.md`](SCHEMA.md): **63
 activities, ~40 users, 16 `ranking_events` rows.** Projections are to **5,000
