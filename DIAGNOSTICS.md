@@ -379,6 +379,84 @@ experiment is a wider sweep, not an edit. Both are decisions to surface.
 
 ---
 
+## C — Collapsed scaled pairs (v1.8 §2)
+
+Twelve `{village, city}` pairs were declared across v1.6. **Exactly one was ever
+swept** — proximity, in §D4 — and that sweep found the primary metric flat in
+it, with the repeat-rate gain *largest* at N=600, which is the opposite of what
+its pair asserts. The other eleven were asserted and never tested.
+
+§D4 also showed this harness can produce a confident three-seed verdict that is
+backwards, and that the backwards verdict was the one **validating the existing
+design**. Eleven untested pairs is eleven chances to be confidently wrong in the
+comfortable direction.
+
+All twelve are collapsed to the **city** value. Shelved, not deleted: coverage,
+EWMA, hysteresis, `resolve()` and the `Scaled<T>` type are intact and still
+tested; `resolveParams` is now an identity, asserted by a test that walks the
+whole continuum and requires byte-identical output.
+
+| parameter | village | city | collapsed to |
+|---|---:|---:|---:|
+| `pJoin.interestAffinity` | 0.10 | 0.30 | **0.30** |
+| `pJoin.proximity` | 0.40 | 0.20 | **0.20** ⚠️ |
+| `pJoin.timeFit` | 0.20 | 0.12 | **0.12** |
+| `pJoin.intentMatch` | 0.10 | 0.15 | **0.15** |
+| `pJoin.socialContext` | 0.05 | 0.08 | **0.08** |
+| `pJoin.graphAffinity` | 0.0 | 0.0 | **0.0** (stub) |
+| `exploreEpsilon` | 0.0 | 0.15 | **0.15** |
+| `quotas.affinity` | 0.30 | 0.57 | **0.57** |
+| `quotas.proximity` | 0.70 | 0.28 | **0.28** |
+| `quotas.fresh_host` | 0.0 | 0.10 | **0.10** |
+| `quotas.random` | 0.0 | 0.05 | **0.05** |
+| `categoryPenalty` | 0.95 | 0.80 | **0.80** (UNMEASURED) |
+| `hostPenalty` | 0.85 | 0.60 | **0.60** (UNMEASURED) |
+| `demandWeight` | 0.50 | 0.10 | **0.10** |
+| `overflowPenalty` | 0.6 | 0.2 | **0.2** |
+| `exhaustionRate` | 0.0 | 0.0 | **0.0** (disabled, v1.7 §3.1) |
+| `noveltyBoost` | 1.0 | 2.5 | **2.5** |
+
+### ⚠️ The one value with swept evidence, and why it still took the city column
+
+`pJoin.proximity` is the only collapsed parameter with a measurement behind it,
+and the measurement is awkward.
+
+On **host retention**, the primary metric, §D4 found it flat within noise across
+0.10–0.80 at all three densities; the gated verdict returned
+`OPTIMUM UNIDENTIFIABLE` at N=40 and margins of 0.040 and 0.016 at N=150 and
+N=600. **The sweep identified no value**, so "unless a swept result says
+otherwise" is not satisfied and the city default applies.
+
+On **repeat rate** it rises monotonically and is still rising at 0.80, the top
+of the swept range, with the largest gain at N=600.
+
+Taking 0.20 is the **non-tuning** choice. The primary metric does not
+distinguish the candidates, and picking the repeat-rate direction would be
+tuning a constant to improve a metric — which this build is explicitly not
+doing. Recording the tension here is the alternative to resolving it silently.
+
+The pending experiment is a sweep **wider than 0.80**, not an edit. Note also
+that nothing user-visible depends on this: the ranker is shelved, and the
+shipped deck is proximity-ordered regardless of what P_join's weights say.
+
+### Reactivation condition
+
+A swept pair that beats its collapsed constant at **6+ seeds and 2 standard
+errors** — the bar §D4 had to invent when its own first answer turned out to be
+noise. Not a plausible argument. A measurement.
+
+Two side effects worth noting:
+
+- **The continuity test is now vacuous** and was replaced by a stronger one:
+  `resolveParams` must return byte-identical output at every regime, including
+  NaN and out-of-range input.
+- **`paramsFingerprint` is now constant**, because `noveltyBoost` no longer
+  moves with density. The mechanism (INFERENCES §F6) is retained rather than
+  deleted — it costs one string per cache write, and it is exactly what is
+  needed again the day a pair earns reactivation.
+
+---
+
 ## What this build did NOT do
 
 Did not tune. `constants.ts` contains the same numbers it did before the

@@ -144,17 +144,31 @@ describe('the regime boundary', () => {
     expect(callers).toEqual(['rank.ts']);
   });
 
-  it('scale-dependent constants are declared only as scaled pairs', () => {
-    // A fixed value for something the spec says must scale is a regression that
-    // typechecks perfectly.
+  it('the collapsed parameters are declared as single constants (v1.8 §2)', () => {
+    // THIS RULE INVERTED IN v1.8. Through v1.7 it asserted the opposite: that
+    // each of these was a { village, city } pair, because a fixed value for
+    // something the spec said must scale is a regression that typechecks
+    // perfectly.
+    //
+    // §2 collapsed the pairs — twelve were declared, one was ever swept, and
+    // that sweep found the primary metric flat in it. So the regression to
+    // guard against is now the reverse: a pair reintroduced without the
+    // measurement that would justify it.
+    //
+    // REACTIVATION CONDITION: a swept pair that beats its collapsed constant at
+    // 6+ seeds and 2 standard errors. When one earns it, move that name out of
+    // this list rather than deleting the check.
     const source = readFileSync(join(CORE_DIR, 'constants.ts'), 'utf8');
     for (const name of [
       'exploreEpsilon', 'categoryPenalty', 'hostPenalty',
-      'demandWeight', 'overflowPenalty', 'exhaustionRate',
+      'demandWeight', 'overflowPenalty', 'exhaustionRate', 'noveltyBoost',
     ]) {
-      const bare = new RegExp(`^\\s*${name}:\\s*[\\d.]`, 'm');
-      expect(bare.test(source), `${name} has a fixed value; it must be a {village, city} pair`)
-        .toBe(false);
+      const paired = new RegExp(`^\\s*${name}:\\s*\\{\\s*village`, 'm');
+      expect(
+        paired.test(source),
+        `${name} is declared as a {village, city} pair. v1.8 §2 collapsed these; ` +
+        'reintroducing one needs a sweep beating the constant at 6+ seeds and 2 SE.',
+      ).toBe(false);
     }
   });
 });

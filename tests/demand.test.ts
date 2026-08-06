@@ -25,19 +25,18 @@ const city = resolveParams(1);
 const viewer = makeViewer();
 
 /**
- * v1.7: exhaustion SHIPS OFF (CONSTANTS.scaled.exhaustionRate is 0 at both
- * ends), because `repeatAffinity` has no data and the term therefore damps good
- * repeats and bad ones identically — against the very metric it exists to
- * serve.
+ * v1.7: exhaustion SHIPS OFF (CONSTANTS.collapsed.exhaustionRate is 0), because
+ * `repeatAffinity` has no data and the term therefore damps good repeats and
+ * bad ones identically — against the very metric it exists to serve.
  *
  * The mechanism is not deleted, so it is still tested here at the rates it will
  * be reactivated with. That is the difference between shelving something and
  * abandoning it: these tests keep running, so the day check-ins ship the code
  * still works.
  */
-const reactivated = CONSTANTS.scaled.exhaustionRateWhenReactivated;
-const villageX = { ...village, exhaustionRate: reactivated.village };
-const cityX = { ...city, exhaustionRate: reactivated.city };
+const reactivatedRate = CONSTANTS.collapsed.exhaustionRateWhenReactivated;
+const villageX = { ...village, exhaustionRate: reactivatedRate };
+const cityX = { ...city, exhaustionRate: reactivatedRate * 0.5 };
 
 const post = (over: Parameters<typeof makeCandidate>[0]) => makeCandidate(over);
 
@@ -129,7 +128,7 @@ describe('exhaustion', () => {
     expect(p(100)).toBeLessThan(1);
   });
 
-  it('bites harder at village scale, where new faces are scarce', () => {
+  it('is monotone in the rate', () => {
     const c = post({ activityId: 'a', completedTogether: 3 });
     expect(exhaustion(c, villageX)).toBeGreaterThan(exhaustion(c, cityX));
   });
@@ -183,22 +182,26 @@ describe('exhaustion ships disabled (v1.7 §3.1)', () => {
     expect(adjustment.multiplier).toBe(1);
   });
 
-  it('keeps the tuned rates parked for reactivation', () => {
+  it('keeps the tuned rate parked for reactivation', () => {
     // Shelved, not abandoned. The reactivation condition is stated in exactly
-    // one place (constants.ts) and the numbers are not lost with it.
-    expect(reactivated.village).toBeGreaterThan(0);
-    expect(reactivated.city).toBeGreaterThan(0);
-    expect(reactivated.village).toBeGreaterThan(reactivated.city);
+    // one place (constants.ts) and the number is not lost with it.
+    expect(reactivatedRate).toBeGreaterThan(0);
   });
 });
 
 describe('the combined adjustment', () => {
-  it('boosts an empty imminent post far more at village than at city scale', () => {
+  it('boosts an empty imminent post, in proportion to demandWeight', () => {
+    // v1.7 asserted village > city here. v1.8 §2 collapsed demandWeight to a
+    // single constant, so the comparison that remains is against the parameter
+    // rather than against a density that no longer varies.
     const desperate = post({ activityId: 'a', confirmedJoiners: 0, startsAt: T0 + DAY });
-    const v = demandAdjustment(viewer, desperate, T0, village).multiplier;
-    const c = demandAdjustment(viewer, desperate, T0, city).multiplier;
-    expect(v).toBeGreaterThan(c);
-    expect(v).toBeGreaterThan(1.3);
+    const shipped = demandAdjustment(viewer, desperate, T0, village).multiplier;
+    const stronger = demandAdjustment(
+      viewer, desperate, T0, { ...village, demandWeight: village.demandWeight * 5 },
+    ).multiplier;
+
+    expect(shipped).toBeGreaterThan(1);
+    expect(stronger).toBeGreaterThan(shipped);
   });
 
   it('is inert when every term is absent', () => {

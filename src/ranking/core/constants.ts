@@ -373,153 +373,125 @@ export const CONSTANTS = {
   },
 
   /**
-   * Scale-dependent parameters. Each is a { village, city } pair, resolved ONCE
-   * per session by resolveParams() in regime.ts and passed down as plain
-   * numbers. Nothing downstream of resolveParams knows the regime exists —
-   * score.ts, slate.ts and explain.ts do not import the regime module at all,
-   * and tests/purity.test.ts fails the build if they start to.
+   * COLLAPSED PARAMETERS — v1.8 §2.
+   *
+   * These were `{ village, city }` pairs through v1.7. They are now single
+   * constants, and `resolveParams` is an identity over them.
+   *
+   * ---------------------------------------------------------------------------
+   * Why
+   *
+   * The density argument is structurally sound: at 40 users a viewer enumerates
+   * their whole pool in a week, ordering barely matters, and the binding
+   * constraint is liquidity rather than attention. Nothing about that reasoning
+   * has been refuted.
+   *
+   * But of the twelve pairs declared, exactly ONE was ever swept — proximity,
+   * in v1.7 §D4 — and that sweep found the primary metric FLAT in the parameter
+   * at every density, with the repeat-rate gain LARGEST at N=600, which is the
+   * opposite of what the `{0.40, 0.20}` pair asserts. The other eleven were
+   * asserted and never tested.
+   *
+   * §D4 also showed this harness can produce a confident three-seed verdict that
+   * is backwards, and that the backwards verdict was the one VALIDATING the
+   * existing design. Twelve untested pairs is twelve chances to be confidently
+   * wrong in the comfortable direction.
+   *
+   * So: shelved, not deleted. The regime machinery — coverage, EWMA, hysteresis,
+   * `resolve()`, the `Scaled<T>` type — is all intact and all still tested. It
+   * currently has nothing to modulate.
+   *
+   * REACTIVATION CONDITION: a swept pair that beats its collapsed constant at
+   * 6+ seeds and 2 standard errors. Not a plausible argument — a measurement,
+   * to the same bar §D4 had to invent when its own first answer was noise.
+   *
+   * Values are the CITY column throughout. The city end is the one the system
+   * grows into, and it is where v1.5's original constants sat before the pairs
+   * were introduced.
    */
-  scaled: {
+  collapsed: {
     /**
-     * [spec §1.5] P_join weights at each end of the continuum.
-     *
-     * These do NOT each sum to 1 (village sums to 0.85). resolveParams
-     * renormalises after interpolating, which is asserted. Renormalising after
-     * rather than before is deliberate: it keeps each column readable as the
-     * relative importance the spec stated, instead of as pre-divided fractions.
+     * [spec §1.5] P_join weights. Do not sum to 1; `resolveParams` renormalises,
+     * which keeps this table readable as relative importances rather than as
+     * pre-divided fractions.
      */
     pJoin: {
+      interestAffinity: 0.30,
       /**
-       * Weights the `categoryAffinity` feature, which is the interest model's
-       * contribution. Low at village because interest() over three events
-       * contributes more variance than signal.
+       * ⚠️ THE ONE VALUE WITH SWEPT EVIDENCE, AND THE EVIDENCE IS AWKWARD.
+       *
+       * v1.7 §D4 swept this 0.10-0.80 at three densities, six seeds. On host
+       * retention — the primary metric — it is FLAT within noise everywhere, so
+       * the sweep identified no optimum and the city default stands. On repeat
+       * rate it rises monotonically and is still rising at 0.80, the top of the
+       * range, with the largest gain at N=600.
+       *
+       * Taking 0.20 is the non-tuning choice: the primary metric does not
+       * distinguish the candidates, and picking the repeat-rate direction would
+       * be tuning a constant to improve a metric. Recorded in DIAGNOSTICS.md
+       * §C rather than resolved here — the pending experiment is a sweep wider
+       * than 0.80, not an edit.
        */
-      interestAffinity: { village: 0.10, city: 0.30 },
+      proximity: 0.20,
+      timeFit: 0.12,
+      intentMatch: 0.15,
+      socialContext: 0.08,
       /**
-       * The simulator's finding made structural. Pure nearest-first beat the
-       * full ranker on repeat rate at 40 users; this is the response to that,
-       * rather than a global retune that would have been wrong at scale.
+       * STUB. graphAffinity() returns 0, so a non-zero weight here would
+       * survive renormalisation and cap P_join below 1 for everyone
+       * (INFERENCES §F2). Set it in the same commit that implements the feature.
        */
-      proximity: { village: 0.40, city: 0.20 },
-      timeFit: { village: 0.20, city: 0.12 },
-      intentMatch: { village: 0.10, city: 0.15 },
-      socialContext: { village: 0.05, city: 0.08 },
-      /**
-       * STUB, both ends. graphAffinity() returns 0 in this build, so the
-       * intended city value of 0.15 is deliberately NOT declared here: a
-       * non-zero weight on an always-zero feature would survive renormalisation
-       * and systematically depress P_join for everyone. Set city to 0.15 in the
-       * same commit that implements graphAffinity, not before.
-       */
-      graphAffinity: { village: 0.0, city: 0.0 },
+      graphAffinity: 0.0,
     },
 
-    /**
-     * [spec §1.5] Explore epsilon. Zero at village: exposure is already
-     * guaranteed by pool exhaustion, so an explore swap spends a real slot to
-     * show a card the user would have seen anyway.
-     */
-    exploreEpsilon: { village: 0.0, city: 0.15 },
+    /** [spec §1.5] Explore epsilon. */
+    exploreEpsilon: 0.15,
 
-    /**
-     * [spec §1.5] Retrieval quotas as FRACTIONS of the deck (they were integers
-     * in v1.5). Fractions because the split has to interpolate continuously and
-     * integers cannot.
-     *
-     * fresh_host and random are pinned by the spec at both ends. The remaining
-     * mass is split between affinity and proximity; that split is [new, GUESS]
-     * — village leans proximity to match its P_join weighting, city keeps the
-     * v1.5 2:1 affinity:proximity ratio.
-     */
+    /** [spec §1.5] Retrieval quotas as fractions of the deck. Must sum to 1. */
     quotas: {
-      affinity: { village: 0.30, city: 0.57 },
-      proximity: { village: 0.70, city: 0.28 },
-      fresh_host: { village: 0.0, city: 0.10 },
-      random: { village: 0.0, city: 0.05 },
-      graph: { village: 0.0, city: 0.0 },
+      affinity: 0.57,
+      proximity: 0.28,
+      fresh_host: 0.10,
+      random: 0.05,
+      graph: 0.0,
     },
 
     /**
-     * [v1.7 §3.2, UNMEASURED] Within-session diversity penalties, which REPLACE
-     * the v1.6 slot caps entirely.
+     * [v1.7 §3.2, UNMEASURED] Within-session diversity penalties.
      *
      *   S_final x= categoryPenalty ^ shownThisSession(category)
      *   S_final x= hostPenalty     ^ shownThisSession(host)
      *
-     * The caps were mis-specified, not mistuned. Every one of them was a
-     * fraction of a deck of 8 — but Discover shows ONE CARD AT A TIME and the
-     * pool does not reset, so "max 2 per category in 8" never binds in a
-     * three-card session and means nothing at all in a forty-card one. A quota
-     * is a claim about a fixed-size window and there is no window.
-     *
-     * Weaker at village, because there is less to diversify INTO: penalising
-     * the second coffee when coffee is most of what exists just demotes the
-     * whole pool uniformly, which is a no-op with extra steps.
-     *
-     * ---------------------------------------------------------------------
-     * BOTH VALUES ARE UNMEASURED. DO NOT TUNE THEM AGAINST feed_impressions.
-     *
-     * Nobody knows the median session length. `feed_impressions` is empty, and
-     * "3 cards" is a number derived from looking at the UI, not from measuring
-     * anyone. These get set from real `ranking_events` data after the beta —
-     * which is the entire reason this build exists. Tuning them now against a
-     * guess would launder that guess into a measurement.
+     * Still UNMEASURED, and still must not be tuned against `feed_impressions`,
+     * which is empty. These get set from real `ranking_events` data after the
+     * beta.
      */
-    categoryPenalty: { village: 0.95, city: 0.80 },
-    hostPenalty: { village: 0.85, city: 0.60 },
+    categoryPenalty: 0.80,
+    hostPenalty: 0.60,
+
+    /** [spec §2] Demand-balancing weight. */
+    demandWeight: 0.10,
+
+    /** [spec §2.2] Overflow penalty on an already-full post. */
+    overflowPenalty: 0.2,
 
     /**
-     * [spec §2] Demand-balancing weight. How hard an unfilled, imminent post is
-     * boosted. High at village because filling posts IS the objective there.
-     */
-    demandWeight: { village: 0.50, city: 0.10 },
-
-    /**
-     * [spec §2.2] Overflow penalty. Showing someone an already-full post costs
-     * them a slot and probably a rejection. Expensive at village scale; at city
-     * scale there is another card right behind it.
-     */
-    overflowPenalty: { village: 0.6, city: 0.2 },
-
-    /**
-     * [spec §3] Exhaustion rate — DISABLED IN v1.7. Both ends are zero.
+     * [spec §3] Exhaustion rate — DISABLED since v1.7 §3.1.
      *
      * REACTIVATION CONDITION: check-in data exists in `tandem_feedback`.
-     * Nothing else. When it does, set these back to
-     * `exhaustionRateWhenReactivated` below and re-run the sweep.
-     *
-     * Why it is off. §3 gates exhaustion on `repeatAffinity`, which comes from
-     * the post-tandem check-in — and there are zero rows of it. So
-     * `repeatAffinity` returns the neutral 0.5 for EVERY pairing, and
-     *
-     *   (1 - exhaustion x (1 - 0.5))
-     *
-     * damps every repeat by the same amount regardless of whether it was a good
-     * one. Repeat-tandem rate is the long-run north star, so a term that
-     * suppresses good repeats and bad repeats identically is not a neutral
-     * placeholder — it is actively working against the metric it exists to
-     * serve.
-     *
-     * The code and its tests stay. This is a data gap, not a design retraction:
-     * §3's claim is that exhaustion needs a compatibility signal to be useful,
-     * and switching it off until that signal exists is that claim taken
-     * seriously rather than argued with.
+     * `repeatAffinity` gates this term and has no data, so it damps good repeats
+     * and bad ones identically — against the metric it exists to serve.
      */
-    exhaustionRate: { village: 0.0, city: 0.0 },
+    exhaustionRate: 0.0,
 
     /**
-     * The v1.6 values, parked rather than deleted, so reactivation is a
-     * one-line swap and the tuned numbers do not have to be rediscovered.
-     * Nothing reads this.
+     * The v1.6 tuned exhaustion values, parked rather than deleted so
+     * reactivation is a one-line swap. Nothing reads this.
      */
-    exhaustionRateWhenReactivated: { village: 0.35, city: 0.15 },
+    exhaustionRateWhenReactivated: 0.15,
 
-    /**
-     * [spec §1.5] Novelty boost (§1.4). Lower at village: novelty is
-     * unmeasurable on three events, and at 1.0 it becomes a mild tiebreak
-     * rather than the dominant term it is at city scale.
-     */
-    noveltyBoost: { village: 1.0, city: 2.5 },
+    /** [spec §1.5] Novelty boost (§1.4). */
+    noveltyBoost: 2.5,
   },
 
   // =========================================================================
@@ -1015,20 +987,20 @@ export const ADJACENT_BUCKET_CREDIT = 0.5;
 // P_join weights are renormalised to 1 after interpolation (see regime.ts), so
 // the columns themselves need not sum to 1 — but each end must carry positive
 // mass, or resolveParams would divide by zero at that extreme.
-for (const end of ['village', 'city'] as const) {
-  const sum = Object.values(CONSTANTS.scaled.pJoin)
-    .reduce((acc, pair) => acc + pair[end], 0);
+{
+  const sum = (Object.values(CONSTANTS.collapsed.pJoin) as number[])
+    .reduce((acc, w) => acc + w, 0);
   if (!(sum > 0)) {
-    throw new Error(`CONSTANTS.scaled.pJoin.${end} must carry positive weight, got ${sum}`);
+    throw new Error(`CONSTANTS.collapsed.pJoin must carry positive weight, got ${sum}`);
   }
 }
 
-// Retrieval quotas are fractions of the deck and must each end sum to 1.
-for (const end of ['village', 'city'] as const) {
-  const sum = Object.values(CONSTANTS.scaled.quotas)
-    .reduce((acc, pair) => acc + pair[end], 0);
+// Retrieval quotas are fractions of the deck and must sum to 1.
+{
+  const sum = (Object.values(CONSTANTS.collapsed.quotas) as number[])
+    .reduce((acc, q) => acc + q, 0);
   if (Math.abs(sum - 1) > 1e-9) {
-    throw new Error(`CONSTANTS.scaled.quotas.${end} must sum to 1, got ${sum}`);
+    throw new Error(`CONSTANTS.collapsed.quotas must sum to 1, got ${sum}`);
   }
 }
 
@@ -1041,11 +1013,9 @@ if (CONSTANTS.regime.coverageHigh <= CONSTANTS.regime.coverageLow) {
 // card indistinguishable from an ineligible one and sorts it arbitrarily
 // against its equally-zeroed peers. The score ORDERS and never filters.
 for (const name of ['categoryPenalty', 'hostPenalty'] as const) {
-  for (const end of ['village', 'city'] as const) {
-    const value = CONSTANTS.scaled[name][end];
-    if (!(value > 0 && value <= 1)) {
-      throw new Error(`CONSTANTS.scaled.${name}.${end} must be in (0, 1], got ${value}`);
-    }
+  const value = CONSTANTS.collapsed[name];
+  if (!(value > 0 && value <= 1)) {
+    throw new Error(`CONSTANTS.collapsed.${name} must be in (0, 1], got ${value}`);
   }
 }
 

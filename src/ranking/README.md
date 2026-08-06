@@ -363,7 +363,23 @@ half-life, the highest and longest in the table. See **SCHEMA.md §6** for the
 `checkin_yes` vs `checkin_positive` naming conflict and why the existing slugs
 were kept.
 
-## Density adaptation (v1.6)
+## Density adaptation (v1.6) — COLLAPSED IN v1.8 §2
+
+> ⚠️ **Every scaled pair below is now a single constant.** Twelve pairs were
+> declared; exactly one was ever swept, and that sweep found the primary metric
+> flat in it. `resolveParams` is an identity — it accepts a regime, validates
+> it, and ignores it.
+>
+> Shelved, not deleted: coverage, EWMA, hysteresis, `resolve()` and `Scaled<T>`
+> are all intact and still tested. Reactivating one pair is turning one constant
+> back into `{ village, city }` and putting `resolve(pair, t)` back on one line.
+>
+> **Reactivation condition:** a swept pair that beats its collapsed constant at
+> 6+ seeds and 2 standard errors. See [`DIAGNOSTICS.md` §C](../../DIAGNOSTICS.md).
+>
+> The section below documents the machinery and the reasoning, both of which
+> still stand. The two-column tables now record what the pairs *were*.
+
 
 The ranker's objective changes with density, and it does so **continuously**.
 There is one algorithm; there is no mode switch, no flag, and no

@@ -137,131 +137,86 @@ describe('the regime scalar', () => {
   });
 });
 
-describe('resolveParams', () => {
-  it('reproduces the declared village and city columns', () => {
-    const village = resolveParams(0);
-    const city = resolveParams(1);
-    const s = CONSTANTS.scaled;
+describe('resolveParams is an identity over collapsed constants (v1.8 §2)', () => {
+  it('returns the declared constants', () => {
+    const p = resolveParams(0.5);
+    const c = CONSTANTS.collapsed;
 
-    expect(village.exploreEpsilon).toBe(s.exploreEpsilon.village);
-    expect(city.exploreEpsilon).toBe(s.exploreEpsilon.city);
-    expect(village.categoryPenalty).toBe(s.categoryPenalty.village);
-    expect(city.categoryPenalty).toBe(s.categoryPenalty.city);
-    expect(village.hostPenalty).toBe(s.hostPenalty.village);
-    expect(city.hostPenalty).toBe(s.hostPenalty.city);
-    expect(village.noveltyBoost).toBe(s.noveltyBoost.village);
-    expect(city.noveltyBoost).toBe(s.noveltyBoost.city);
-    expect(village.demandWeight).toBe(s.demandWeight.village);
-    expect(city.demandWeight).toBe(s.demandWeight.city);
-    expect(village.exhaustionRate).toBe(s.exhaustionRate.village);
-    expect(city.exhaustionRate).toBe(s.exhaustionRate.city);
+    expect(p.exploreEpsilon).toBe(c.exploreEpsilon);
+    expect(p.categoryPenalty).toBe(c.categoryPenalty);
+    expect(p.hostPenalty).toBe(c.hostPenalty);
+    expect(p.noveltyBoost).toBe(c.noveltyBoost);
+    expect(p.demandWeight).toBe(c.demandWeight);
+    expect(p.exhaustionRate).toBe(c.exhaustionRate);
+    expect(p.overflowPenalty).toBe(c.overflowPenalty);
   });
 
-  it('renormalises P_join to exactly 1 at every point on the continuum', () => {
-    for (let r = 0; r <= 1.0001; r += 0.01) {
-      const p = resolveParams(r);
-      const sum = Object.values(p.pJoin).reduce((a, b) => a + b, 0);
-      expect(sum).toBeCloseTo(1, 12);
+  it('IGNORES the regime entirely — the property the collapse asserts', () => {
+    // Twelve pairs were declared; exactly one was ever swept, and that sweep
+    // found the primary metric flat in it. The pairs are shelved rather than
+    // trusted, and this is the test that says so unambiguously.
+    const reference = JSON.stringify(resolveParams(0));
+    for (let r = 0; r <= 1.0001; r += 0.05) {
+      expect(JSON.stringify(resolveParams(r)), `regime ${r.toFixed(2)} differed`)
+        .toBe(reference);
     }
+    // Including nonsense input, which must not throw or produce NaN.
+    expect(JSON.stringify(resolveParams(-3))).toBe(reference);
+    expect(JSON.stringify(resolveParams(9))).toBe(reference);
+    expect(JSON.stringify(resolveParams(Number.NaN))).toBe(reference);
   });
 
-  it('keeps retrieval quotas summing to 1 at every point', () => {
-    for (let r = 0; r <= 1.0001; r += 0.01) {
-      const p = resolveParams(r);
-      const sum = Object.values(p.quotas).reduce((a, b) => a + b, 0);
-      expect(sum).toBeCloseTo(1, 12);
-    }
+  it('still renormalises P_join to exactly 1', () => {
+    const sum = Object.values(resolveParams(0.5).pJoin).reduce((a, b) => a + b, 0);
+    expect(sum).toBeCloseTo(1, 12);
   });
 
-  it('is continuous — no parameter jumps anywhere, with NO exemptions', () => {
-    // The whole point of the design. A discontinuity here is a mode switch
-    // wearing a coefficient's clothes, and it would be felt by users on one day.
-    //
-    // v1.7 removed the exemption list. v1.6 had to exempt maxPerCategory and
-    // maxPerHost: they were integer counts, so they stepped by 1 and were the
-    // one legitimate discontinuity in the system. Replacing them with
-    // multiplicative session penalties made every resolved parameter continuous,
-    // so this test now covers all of them and lets none through.
-    const step = 0.005;
-
-    let previous = resolveParams(0);
-    for (let r = step; r <= 1.0001; r += step) {
-      const current = resolveParams(r);
-
-      for (const [key, value] of Object.entries(current)) {
-        if (typeof value !== 'number') continue;
-        const before = (previous as unknown as Record<string, number>)[key] as number;
-        const delta = Math.abs(value - before);
-        expect(delta, `${key} jumped by ${delta} at regime ${r.toFixed(3)}`)
-          .toBeLessThanOrEqual(0.05);
-      }
-
-      for (const [key, value] of Object.entries(current.pJoin)) {
-        const before = (previous.pJoin as Record<string, number>)[key] as number;
-        expect(Math.abs(value - before), `pJoin.${key} jumped at ${r.toFixed(3)}`)
-          .toBeLessThan(0.02);
-      }
-
-      previous = current;
-    }
+  it('still keeps retrieval quotas summing to 1', () => {
+    const sum = Object.values(resolveParams(0.5).quotas).reduce((a, b) => a + b, 0);
+    expect(sum).toBeCloseTo(1, 12);
   });
 
-  it('moves proximity down and interest up as density rises', () => {
-    // The simulator's finding, made structural: at low density proximity is the
-    // dominant feature and the interest model is mostly variance.
-    const village = resolveParams(0);
-    const city = resolveParams(1);
-
-    expect(village.pJoin.proximity).toBeGreaterThan(city.pJoin.proximity);
-    expect(village.pJoin.interestAffinity).toBeLessThan(city.pJoin.interestAffinity);
-    expect(village.pJoin.proximity).toBeGreaterThan(village.pJoin.interestAffinity);
-    expect(city.pJoin.interestAffinity).toBeGreaterThan(city.pJoin.proximity);
-  });
-
-  it('spends no slots on exploration at village scale', () => {
-    const village = resolveParams(0);
-    expect(village.exploreEpsilon).toBe(0);
-    expect(village.quotas.random).toBe(0);
-    expect(village.quotas.fresh_host).toBe(0);
-    // All of it goes to the two sources that are actually informative there.
-    expect(village.quotas.affinity + village.quotas.proximity).toBeCloseTo(1, 12);
-  });
-
-  it('clamps rather than extrapolating out-of-range regimes', () => {
-    expect(resolveParams(-3)).toEqual(resolveParams(0));
-    expect(resolveParams(9)).toEqual(resolveParams(1));
-    expect(resolveParams(Number.NaN)).toEqual(resolveParams(0));
-  });
-
-  it('keeps the session penalties weaker at village than at city', () => {
-    // You cannot diversify a pool that is not diverse. At village scale,
-    // penalising the second coffee when coffee is most of what exists demotes
-    // the whole pool uniformly, which is a no-op with extra steps.
-    const village = resolveParams(0);
-    const city = resolveParams(1);
-
-    expect(village.categoryPenalty).toBeGreaterThan(city.categoryPenalty);
-    expect(village.hostPenalty).toBeGreaterThan(city.hostPenalty);
-  });
-
-  it('never lets a session penalty reach zero', () => {
-    // A penalty of 0 is a hard cap wearing a multiplier's clothes: it drives
-    // the score to exactly zero, and a zeroed card is indistinguishable from an
-    // ineligible one. The score ORDERS and never filters.
-    for (let r = 0; r <= 1.0001; r += 0.01) {
-      const p = resolveParams(r);
-      expect(p.categoryPenalty).toBeGreaterThan(0);
-      expect(p.hostPenalty).toBeGreaterThan(0);
-      expect(p.categoryPenalty).toBeLessThanOrEqual(1);
-      expect(p.hostPenalty).toBeLessThanOrEqual(1);
-    }
-  });
-
-  it('keeps graphAffinity at zero weight at both ends this build', () => {
+  it('keeps graphAffinity at zero weight while the feature is a stub', () => {
     // A non-zero weight on an always-zero feature survives renormalisation and
-    // systematically depresses P_join for everyone.
-    expect(resolveParams(0).pJoin.graphAffinity).toBe(0);
-    expect(resolveParams(1).pJoin.graphAffinity).toBe(0);
+    // caps P_join below 1 for everyone (INFERENCES §F2).
+    expect(resolveParams(0.5).pJoin.graphAffinity).toBe(0);
+  });
+
+  it('keeps the session penalties inside (0, 1]', () => {
+    // A penalty of 0 would be a hard cap wearing a multiplier's clothes.
+    const p = resolveParams(0.5);
+    expect(p.categoryPenalty).toBeGreaterThan(0);
+    expect(p.categoryPenalty).toBeLessThanOrEqual(1);
+    expect(p.hostPenalty).toBeGreaterThan(0);
+    expect(p.hostPenalty).toBeLessThanOrEqual(1);
+  });
+
+  it('ships exhaustion disabled', () => {
+    expect(resolveParams(0.5).exhaustionRate).toBe(0);
+    // The tuned value is parked, not lost, so reactivation is a one-line swap.
+    expect(CONSTANTS.collapsed.exhaustionRateWhenReactivated).toBeGreaterThan(0);
+  });
+});
+
+describe('the density machinery survives the collapse', () => {
+  // Shelved, not deleted. Coverage, smoothing, hysteresis and the interpolation
+  // primitive are all intact and all still tested above and below — they simply
+  // have nothing to modulate today. Reactivating a pair is one edit in
+  // resolveParams plus turning one constant back into a { village, city }.
+
+  it('still measures coverage and still smooths it', () => {
+    const reading = computeRegime(
+      { eligiblePostsPerWeek: 80, cardsViewedPerWeek: 20, weeksOfHistory: 9 },
+      { coverageEwma: 2, lastRegime: 0.2, updatedAt: null },
+    );
+    expect(reading.coverage).toBe(4);
+    expect(reading.coverageEwma).toBeGreaterThan(2);
+    expect(reading.regime).toBeGreaterThanOrEqual(0);
+    expect(reading.regime).toBeLessThanOrEqual(1);
+  });
+
+  it('still interpolates, for the day a pair earns reactivation', () => {
+    expect(resolve({ village: 10, city: 20 }, 0.5)).toBe(15);
   });
 });
 
@@ -275,12 +230,18 @@ describe('resolve()', () => {
 });
 
 describe('params fingerprint', () => {
-  it('changes when the interest-affecting parameter changes', () => {
-    // The interest vector depends on noveltyBoost, which moves with density, so
-    // a cached vector computed under one regime is wrong under another.
+  it('is stable now that noveltyBoost is constant', () => {
+    // Through v1.7 noveltyBoost moved with density, so a cached interest vector
+    // computed under one regime was WRONG under another rather than merely
+    // stale (INFERENCES §F6). Collapsing the pairs makes it constant.
     expect(paramsFingerprint(resolveParams(0)))
-      .not.toBe(paramsFingerprint(resolveParams(1)));
-    expect(paramsFingerprint(resolveParams(0.5)))
-      .toBe(paramsFingerprint(resolveParams(0.5)));
+      .toBe(paramsFingerprint(resolveParams(1)));
+  });
+
+  it('is retained rather than removed', () => {
+    // It costs one string per cache write and is exactly what would be needed
+    // again the day a swept pair earns reactivation. A cache-invalidation bug
+    // discovered six months later is not worth the deletion.
+    expect(paramsFingerprint(resolveParams(0.5))).toMatch(/^nb:/);
   });
 });

@@ -118,11 +118,9 @@ function armParams(arm: Arm, regime: number, opts: Options): Partial<ResolvedPar
   };
 }
 
-/** §4.2: the v1.6 exhaustion rates, for the counterfactual arm only. */
-function reactivatedExhaustion(regime: number): number {
-  const r = CONSTANTS.scaled.exhaustionRateWhenReactivated;
-  const t = Math.max(0, Math.min(1, regime));
-  return r.village + (r.city - r.village) * t;
+/** §4.2: the v1.6 exhaustion rate, for the counterfactual arm only. */
+function reactivatedExhaustion(_regime: number): number {
+  return CONSTANTS.collapsed.exhaustionRateWhenReactivated;
 }
 
 /**

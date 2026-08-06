@@ -395,8 +395,19 @@ describe('time is injected', () => {
   });
 });
 
-describe('village scale (v1.6 §2.3)', () => {
-  it('spends no slots on explore or fresh-host quotas', () => {
+describe('the §2.3 claim, now reachable only by configuring it (v1.8 §2)', () => {
+  // v1.6 §2.3 claimed that at village scale the fairness rules stop being
+  // DISPLACEMENT rules and become ORDERING rules: nothing needs a reserved slot
+  // when the whole pool gets shown anyway, because urgency surfaces an unfilled
+  // new host's post on its own.
+  //
+  // v1.8 §2 collapsed the density pairs, so "village scale" is no longer a
+  // configuration the system can be in. The claim is not refuted — it was never
+  // tested against data — it is simply no longer reachable by setting `regime`.
+  // These tests now configure the parameters directly, which keeps the claim
+  // exercised and makes explicit what used to be implied by a scalar.
+
+  it('spends no slots on explore or fresh-host quotas when they are zero', () => {
     const result = rank(
       {
         viewer: makeViewer(),
@@ -406,7 +417,13 @@ describe('village scale (v1.6 §2.3)', () => {
         now: T0,
         ...VILLAGE,
       },
-      { debug: true },
+      {
+        debug: true,
+        paramsOverride: {
+          exploreEpsilon: 0,
+          quotas: { affinity: 0.7, proximity: 0.3, fresh_host: 0, random: 0, graph: 0 },
+        },
+      },
     );
 
     expect(result.debug!.params.exploreEpsilon).toBe(0);
@@ -415,10 +432,10 @@ describe('village scale (v1.6 §2.3)', () => {
   });
 
   it("a new host's first post reaches the top 3 with NO fresh-host slot", () => {
-    // The §2.3 claim: at village scale the fairness rules stop being
-    // displacement rules and become ordering rules. Nothing is displaced when
-    // the whole pool gets shown anyway — a brand-new host's post has
-    // fillRatio 0, so urgency surfaces it without a reserved slot.
+    // The §2.3 claim itself, with the parameters it needs supplied explicitly
+    // rather than arriving via a regime scalar: a strong demand weight and no
+    // reserved fresh-host slot. A brand-new host's post has fillRatio 0, so
+    // urgency surfaces it without anything being displaced.
     const pool = standardPool().map((c) =>
       c.hostId === 'host_g'
         // Brand-new host, nobody signed up, happening in two days, and
@@ -438,7 +455,16 @@ describe('village scale (v1.6 §2.3)', () => {
         now: T0,
         ...VILLAGE,
       },
-      { debug: true },
+      {
+        debug: true,
+        paramsOverride: {
+          ...resolveParams(0),
+          demandWeight: 0.5,
+          overflowPenalty: 0.6,
+          exploreEpsilon: 0,
+          quotas: { affinity: 0.3, proximity: 0.7, fresh_host: 0, random: 0, graph: 0 },
+        },
+      },
     );
 
     const top3 = result.slate.cards.slice(0, 3).map((c) => c.hostId);
@@ -464,7 +490,7 @@ describe('village scale (v1.6 §2.3)', () => {
     // what exists demotes the whole pool uniformly, which is a no-op with extra
     // steps.
     expect(result.debug!.params.categoryPenalty)
-      .toBe(CONSTANTS.scaled.categoryPenalty.village);
+      .toBe(CONSTANTS.collapsed.categoryPenalty);
     // No relaxation is recorded, because nothing was constrained in the first
     // place. Relaxations should mean "we wanted to and could not", not "n/a".
     expect(result.debug!.relaxations).toEqual([]);
@@ -510,6 +536,6 @@ describe('regime is derived when not supplied', () => {
     );
     expect(result.debug!.regime).toBe(1);
     expect(result.debug!.params.categoryPenalty)
-      .toBe(CONSTANTS.scaled.categoryPenalty.city);
+      .toBe(CONSTANTS.collapsed.categoryPenalty);
   });
 });

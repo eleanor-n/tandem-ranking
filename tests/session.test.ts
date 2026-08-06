@@ -182,13 +182,11 @@ describe('slate assembly under the penalties', () => {
 });
 
 describe('the constants are marked UNMEASURED and stay honest', () => {
-  it('both penalties are in (0, 1] at both ends', () => {
+  it('both penalties are in (0, 1]', () => {
     for (const name of ['categoryPenalty', 'hostPenalty'] as const) {
-      for (const end of ['village', 'city'] as const) {
-        const value = CONSTANTS.scaled[name][end];
-        expect(value).toBeGreaterThan(0);
-        expect(value).toBeLessThanOrEqual(1);
-      }
+      const value = CONSTANTS.collapsed[name];
+      expect(value).toBeGreaterThan(0);
+      expect(value).toBeLessThanOrEqual(1);
     }
   });
 });
