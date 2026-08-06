@@ -150,11 +150,18 @@ export const TERM_CLASS = {
    */
   freshness: 'global_quality',
   /**
-   * Category repeatability class. Three distinct values across fourteen
-   * categories, identical for everyone. Rank-normalised and dampened, or
-   * dropped — v1.8 §3 measures which.
+   * Category repeatability class, raw. Three distinct values across fourteen
+   * categories, identical for everyone. LOGGED but no longer read by the score.
    */
   repeatableContext: 'global_quality',
+  /**
+   * The same thing, rank-normalised over the pool's categories and dampened
+   * (§1.4). STILL `global_quality`, and deliberately so: ranking and damping
+   * reduce how much consensus the term creates, they do not make a category's
+   * repeatability depend on who is looking. It is admitted under
+   * `DAMPENED_MULTIPLICANDS`, which is a provisional category pending §3.4.
+   */
+  repeatableContextRank: 'global_quality',
 
   // --- global allocation: required to be global -----------------------------
   /**

@@ -145,11 +145,12 @@ attention, simultaneously.
 | `socialContext` | pairwise | summed in P_join |
 | `rhythmOverlap` | pairwise | multiplier, via `R_repeat` |
 | `graphAffinity` | pairwise | stub, weight 0 |
-| `acceptLikelihood` | **global-quality** → pairwise (§1.2) | rank-normalised host term × viewer acceptability |
-| `hostReliability` | **global-quality** | only *inside* `acceptLikelihood`, rank-normalised and dampened |
-| `completionPrior` | **global-quality** | gate, not multiplier (§1.3) |
-| `freshness` | **global-quality** | folded into the gate |
-| `repeatableContext` | **global-quality** | rank-normalised + dampened, or dropped (§1.4) |
+| `acceptLikelihood` | pairwise *(was global-quality)* | `hostRank^ρ × (1 + pickiness × viewerDeviation)` — §1.2 |
+| `hostReliability` | global-quality | only *inside* `acceptLikelihood`, rank-normalised and dampened |
+| `completionPrior` | global-quality | **gate**, not multiplier — §1.3 |
+| `freshness` | global-quality | folded into the gate |
+| `repeatableContext` | global-quality | logged; no longer read by the score |
+| `repeatableContextRank` | global-quality | **dampened multiplicand** — provisional, §1.4 |
 | `exposureBoost` | global-allocation | multiplier — allowed and load-bearing |
 | `demandMultiplier` | global-allocation | multiplier — allowed and load-bearing |
 
@@ -184,9 +185,29 @@ anyone choosing that. `tests/classification.test.ts` then:
   drift from the expression it claims to describe
 - asserts P_join *sums* its constituents rather than multiplying them
 
-**These tests currently document a defect that is still present.** Four
-multiplied leaves are `global_quality`. That count is pinned so it can shrink as
-§1.2–1.4 land, and cannot silently grow.
+**The guard is armed.** Four multiplied leaves were `global_quality` through
+v1.7; there are now none, so `score.ts` calls
+`assertNoGlobalQualityMultipliers` at module load. A future edit that multiplies
+in a quality score, a trust score, or a verified-host bonus crashes on import
+rather than shipping.
+
+### The four ways a term can reach the deck
+
+| list | admits | why it is safe |
+|---|---|---|
+| `PJOIN_SUMMANDS` | per-viewer, pairwise | a weighted **sum** of per-viewer terms is per-viewer |
+| `MULTIPLICATIVE_LEAVES` | per-viewer, pairwise, global-**allocation** | either no consensus, or consensus that *spreads* attention |
+| `GATE_TERMS` | global-quality | a **sort key** cannot compound — it splits the deck into blocks and orders within them |
+| `DAMPENED_MULTIPLICANDS` | global-quality, rank-normalised, exponent < 1 | **provisional.** See below |
+
+⚠️ `DAMPENED_MULTIPLICANDS` should be viewed with suspicion. Damping does not
+change what a term *depends on* — a category's repeatability is the same fact
+for every viewer no matter what power it is raised to, so the term still creates
+consensus, just less of it. The category exists because "dampen it" and "drop
+it" are both defensible and only a measurement separates them, **not** because
+dampening launders a global term into a safe one. §3.4 runs both arms; if
+keeping it does not pay, the answer is `repeatableContextWeight: 0`, not a
+smaller exponent.
 
 ## What is on, and what is off (v1.7)
 

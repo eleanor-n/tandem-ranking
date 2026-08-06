@@ -330,6 +330,17 @@ export interface ResolvedParams {
    * penalties.
    */
   completionFloor: number;
+  /**
+   * Weight on the rank-normalised `repeatableContext` term inside R_repeat
+   * (v1.8 §1.4). ZERO DROPS IT — which is one of the two arms §3.4 runs.
+   */
+  repeatableContextWeight: number;
+  /**
+   * Damping exponent on that rank (v1.8 §1.4). 0 flattens it to a constant,
+   * 1 is the raw rank. Same treatment as the host term in §1.2, for the same
+   * reason: a global term should be an advantage, not a monopoly.
+   */
+  repeatableContextDamping: number;
   /** Rate in exhaustion = 1 - exp(-rate * completedTogether) (§3). */
   exhaustionRate: number;
   /** beta in salience = interest x (1 + beta * novelty) (§1.4). */
@@ -357,7 +368,14 @@ export interface FeatureVector {
   hostReliability: Unit;
   acceptLikelihood: Unit;
   completionPrior: Unit;
+  /** Raw category repeatability class. LOGGED, no longer read by the score. */
   repeatableContext: Unit;
+  /**
+   * `repeatableContext` rank-normalised against the categories present in the
+   * pool (v1.8 §1.4). This is what `R_repeat` reads. Equals the raw value when
+   * no population context was supplied.
+   */
+  repeatableContextRank: Unit;
   rhythmOverlap: Unit;
   freshness: Unit;
   /** STUB in v1.5: always 0. See features.ts → graphAffinity. */

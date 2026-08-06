@@ -560,9 +560,28 @@ export const CONSTANTS = {
      */
     rRepeat: {
       base: 1.0,
+      /**
+       * [v1.8 §1.4] Weight on the DAMPENED, RANK-NORMALISED repeatable-context
+       * term. Setting it to 0 drops the term; §3.4 runs it both ways, because
+       * "dampen it" and "delete it" are both defensible and only a measurement
+       * separates them.
+       */
       repeatableContext: 0.25,
       rhythmOverlap: 0.25,
     },
+
+    /**
+     * [v1.8 §1.4, UNMEASURED] Damping exponent on the rank-normalised
+     * repeatable-context term. Same shape and same reason as
+     * `features.acceptance.hostAcceptDamping`.
+     *
+     * Note what damping does and does not fix. It reduces the MAGNITUDE of the
+     * consensus this term creates; it does not make the term viewer-dependent,
+     * because a category's repeatability is the same fact for everybody. That
+     * is why §3.4 measures keeping it against dropping it rather than treating
+     * a lower exponent as the answer.
+     */
+    repeatableContextDamping: 0.5,
   },
 
   // =========================================================================

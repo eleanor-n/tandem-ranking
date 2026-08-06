@@ -15,7 +15,7 @@
 import { CONSTANTS } from './constants.js';
 import { buildScoringContext, computeFeatures } from './features.js';
 import { NEUTRAL_DEMAND, demandAdjustment, type DemandAdjustment } from './demand.js';
-import { TERM_CLASS, type TermName } from './classification.js';
+import { TERM_CLASS, assertNoGlobalQualityMultipliers, type TermName } from './classification.js';
 import type {
   Candidate,
   Epoch,
@@ -45,10 +45,28 @@ import type {
  */
 export const MULTIPLICATIVE_LEAVES: readonly TermName[] = [
   'acceptLikelihood',      // via pAccept — pairwise as of v1.8 §1.2
-  'repeatableContext',     // via rRepeat — global_quality, §1.4 dampens or drops
   'rhythmOverlap',         // via rRepeat — pairwise
   'exposureBoost',
   'demandMultiplier',
+];
+
+/**
+ * Global-quality terms admitted at REDUCED MAGNITUDE — rank-normalised over the
+ * pool and raised to a damping exponent below 1.
+ *
+ * THIS CATEGORY IS PROVISIONAL AND SHOULD BE VIEWED WITH SUSPICION.
+ *
+ * Damping does not change what a term depends on. A category's repeatability is
+ * the same fact for every viewer no matter what power it is raised to, so this
+ * term still creates consensus — just less of it. The category exists because
+ * "dampen it" and "drop it" are both defensible and only a measurement
+ * separates them, not because dampening launders a global term into a safe one.
+ *
+ * v1.8 §3.4 runs it both ways. If keeping it does not pay, the correct response
+ * is `repeatableContextWeight: 0`, not a smaller exponent.
+ */
+export const DAMPENED_MULTIPLICANDS: readonly TermName[] = [
+  'repeatableContextRank',  // via rRepeat
 ];
 
 /**
@@ -82,14 +100,20 @@ export const PJOIN_SUMMANDS: readonly TermName[] = [
 /**
  * How many of the multiplied leaves are global-quality terms.
  *
- * Was FOUR before v1.8. §1.2 moved `acceptLikelihood` out by restoring its
- * viewer-dependence, leaving three; §1.3 and §1.4 take the rest. Stated as a
- * number the build can check rather than as a paragraph someone might disagree
- * with — `tests/classification.test.ts` pins it, so it can shrink but never
- * silently grow.
+ * Was FOUR before v1.8, and is now ZERO: §1.2 restored `acceptLikelihood`'s
+ * viewer-dependence, §1.3 turned `completionPrior`/`freshness` into a gate, and
+ * §1.4 moved `repeatableContext` into the dampened list.
+ *
+ * Because it is zero, the load-time guard below is now ARMED. A future edit
+ * that multiplies a global-quality term into the score crashes on import
+ * rather than shipping.
  */
 export const GLOBAL_QUALITY_MULTIPLIER_COUNT: number =
   MULTIPLICATIVE_LEAVES.filter((t) => TERM_CLASS[t] === 'global_quality').length;
+
+// ARMED as of v1.8 §1.4. A comment saying "do not multiply global quality terms"
+// survives one distracted afternoon; this does not.
+assertNoGlobalQualityMultipliers(MULTIPLICATIVE_LEAVES);
 
 /**
  * P_join — would this viewer tap "i'm in" if shown this card?
@@ -135,9 +159,28 @@ export function pComplete(f: FeatureVector): number {
  * equally-likely one-off, and this is where that belief is expressed
  * numerically.
  */
-export function rRepeat(f: FeatureVector): number {
+export function rRepeat(f: FeatureVector, params: ResolvedParams): number {
   const w = CONSTANTS.score.rRepeat;
-  return w.base + w.repeatableContext * f.repeatableContext + w.rhythmOverlap * f.rhythmOverlap;
+
+  // The two halves are different KINDS of thing and v1.8 §1.4 stopped treating
+  // them alike.
+  //
+  //   rhythmOverlap is pairwise — do you and this host tend to be free at the
+  //   same times. Different for every pair, so it creates no consensus. It
+  //   keeps its multiplier untouched.
+  //
+  //   repeatableContext is a fact about a CATEGORY, identical for everyone.
+  //   Rank-normalised over the pool and dampened, which reduces how much
+  //   consensus it creates without pretending to remove it — a category's
+  //   repeatability does not become viewer-dependent by being raised to a
+  //   power. Whether the residue earns its place is a measurement (§3.4), and
+  //   `repeatableContextWeight: 0` is the arm that drops it.
+  const context = params.repeatableContextWeight > 0
+    ? params.repeatableContextWeight *
+      Math.pow(f.repeatableContextRank, params.repeatableContextDamping)
+    : 0;
+
+  return w.base + context + w.rhythmOverlap * f.rhythmOverlap;
 }
 
 /**
@@ -175,7 +218,7 @@ export function scoreFeatures(
   const j = pJoin(f, params);
   const a = pAccept(f);
   const c = pComplete(f);
-  const r = rRepeat(f);
+  const r = rRepeat(f, params);
   const e = params.funnelExponent;
 
   // P_complete is COMPUTED but no longer MULTIPLIES (v1.8 §1.3). It is a gate;

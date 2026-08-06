@@ -536,6 +536,7 @@ export function computeFeatures(
   context?: ScoringContext,
 ): FeatureVector {
   const hostRank = context?.hostReliabilityRank.get(candidate.hostId);
+  const raw = repeatableContext(candidate);
 
   return {
     categoryAffinity: categoryAffinity(viewer, candidate, state),
@@ -546,7 +547,8 @@ export function computeFeatures(
     hostReliability: hostReliability(candidate),
     acceptLikelihood: acceptLikelihood(viewer, candidate, hostRank),
     completionPrior: completionPrior(candidate, now),
-    repeatableContext: repeatableContext(candidate),
+    repeatableContext: raw,
+    repeatableContextRank: context?.repeatableContextRank.get(candidate.category) ?? raw,
     rhythmOverlap: rhythmOverlap(viewer, candidate),
     freshness: freshness(candidate, now),
     graphAffinity: graphAffinity(viewer, candidate, now),

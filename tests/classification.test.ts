@@ -23,7 +23,12 @@ import {
   assertNoGlobalQualityMultipliers,
   type TermName,
 } from '../src/ranking/core/classification.js';
+import { rRepeat } from '../src/ranking/core/score.js';
+import { resolveParams } from '../src/ranking/core/regime.js';
+import { CONSTANTS } from '../src/ranking/core/constants.js';
+import type { FeatureVector } from '../src/ranking/core/types.js';
 import {
+  DAMPENED_MULTIPLICANDS,
   GATE_TERMS,
   GLOBAL_QUALITY_MULTIPLIER_COUNT,
   MULTIPLICATIVE_LEAVES,
@@ -31,6 +36,7 @@ import {
 } from '../src/ranking/core/score.js';
 
 const CORE = join(import.meta.dirname, '..', 'src', 'ranking', 'core');
+const RANKER = resolveParams(1);
 
 /** Strip comments and strings, same helper the purity test uses. */
 function code(source: string): string {
@@ -98,30 +104,74 @@ describe('the classification is total and honest', () => {
   });
 });
 
-describe('the guard fires on the current score', () => {
-  it('flags exactly the four terms v1.7 D3 measured', () => {
-    // This test documents a DEFECT THAT IS STILL PRESENT. It is not a green
-    // check mark. §1.2-1.4 shrink this list; when it is empty the assertion
-    // below becomes `not.toThrow()` and the load-time guard is switched on.
-    const offenders = MULTIPLICATIVE_LEAVES.filter(
-      (t) => TERM_CLASS[t] === 'global_quality',
-    );
+describe('the guard is armed and the score passes it', () => {
+  it('multiplies no global-quality term', () => {
+    // Was four through v1.7 and is now zero. §1.2 restored acceptLikelihood's
+    // viewer-dependence, §1.3 turned completionPrior/freshness into a gate,
+    // §1.4 moved repeatableContext into the dampened list.
+    expect(GLOBAL_QUALITY_MULTIPLIER_COUNT).toBe(0);
+    expect(() => assertNoGlobalQualityMultipliers(MULTIPLICATIVE_LEAVES)).not.toThrow();
+  });
 
-    expect(offenders.sort()).toEqual(['repeatableContext']);
-
-    expect(() => assertNoGlobalQualityMultipliers(MULTIPLICATIVE_LEAVES))
+  it('still throws on a list that reintroduces one', () => {
+    // So the pass above is a property of the score, not of a guard that has
+    // quietly stopped checking anything.
+    const regressed: TermName[] = [...MULTIPLICATIVE_LEAVES, 'completionPrior'];
+    expect(() => assertNoGlobalQualityMultipliers(regressed))
       .toThrow(/Global-quality terms used as raw score multipliers/);
   });
 
-  it('pins the violation count so it can shrink but never grow', () => {
-    expect(GLOBAL_QUALITY_MULTIPLIER_COUNT).toBeLessThanOrEqual(1);
+  it('runs the guard at module load, not only in this file', () => {
+    // score.ts calls it on its own declared list at import time, so a future
+    // edit crashes on import rather than shipping. Importing the module here
+    // is itself the assertion; it would have thrown above if it were going to.
+    const source = readFileSync(join(CORE, 'score.ts'), 'utf8');
+    expect(/^assertNoGlobalQualityMultipliers\(MULTIPLICATIVE_LEAVES\);$/m.test(source))
+      .toBe(true);
+  });
+});
+
+describe('the dampened category is provisional, and says so', () => {
+  it('holds a term that is still global-quality', () => {
+    // Damping does not change what a term DEPENDS ON. A category's
+    // repeatability is the same fact for every viewer no matter what power it
+    // is raised to. The classification must keep saying so, or "I dampened it"
+    // becomes a way to launder any global term into the product.
+    expect(DAMPENED_MULTIPLICANDS.length).toBeGreaterThan(0);
+    for (const term of DAMPENED_MULTIPLICANDS) {
+      expect(TERM_CLASS[term]).toBe('global_quality');
+      expect(MULTIPLICATIVE_LEAVES).not.toContain(term);
+    }
   });
 
-  it('passes cleanly once the global-quality terms are gone', () => {
-    // The guard itself works — proven against a hypothetical repaired list, so
-    // that "it throws" above is not merely a function that always throws.
-    const repaired: TermName[] = ['rhythmOverlap', 'exposureBoost', 'demandMultiplier'];
-    expect(() => assertNoGlobalQualityMultipliers(repaired)).not.toThrow();
+  it('is genuinely dampened, not nominally', () => {
+    // An exponent of 1 would be the raw term with extra vocabulary.
+    expect(CONSTANTS.score.repeatableContextDamping).toBeGreaterThanOrEqual(0);
+    expect(CONSTANTS.score.repeatableContextDamping).toBeLessThan(1);
+  });
+
+  it('can be dropped entirely by one parameter', () => {
+    // §3.4's second arm. If keeping it does not pay, the answer is weight 0 —
+    // not a smaller exponent, which would only make a global term quieter.
+    const kept = rRepeat(
+      { repeatableContextRank: 1, rhythmOverlap: 0 } as FeatureVector,
+      { ...RANKER, repeatableContextWeight: 0.25 },
+    );
+    const dropped = rRepeat(
+      { repeatableContextRank: 1, rhythmOverlap: 0 } as FeatureVector,
+      { ...RANKER, repeatableContextWeight: 0 },
+    );
+    expect(kept).toBeGreaterThan(dropped);
+    expect(dropped).toBe(CONSTANTS.score.rRepeat.base);
+  });
+
+  it('leaves the pairwise half of R_repeat untouched', () => {
+    const w = CONSTANTS.score.rRepeat;
+    const withRhythm = rRepeat(
+      { repeatableContextRank: 0, rhythmOverlap: 1 } as FeatureVector,
+      { ...RANKER, repeatableContextWeight: 0 },
+    );
+    expect(withRhythm).toBeCloseTo(w.base + w.rhythmOverlap, 12);
   });
 });
 
@@ -136,13 +186,15 @@ describe('the declared list matches the code', () => {
     );
     const known = new Set<string>([
       ...MULTIPLICATIVE_LEAVES, ...PJOIN_SUMMANDS, ...GATE_TERMS,
+      ...DAMPENED_MULTIPLICANDS,
     ]);
 
     for (const feature of accessed) {
       expect(
         known.has(feature),
         `score.ts reads f.${feature}, which is in none of MULTIPLICATIVE_LEAVES, ` +
-        'PJOIN_SUMMANDS or GATE_TERMS. Classify it and declare how it enters the deck.',
+        'PJOIN_SUMMANDS, GATE_TERMS or DAMPENED_MULTIPLICANDS. Classify it and ' +
+        'declare how it enters the deck.',
       ).toBe(true);
     }
   });

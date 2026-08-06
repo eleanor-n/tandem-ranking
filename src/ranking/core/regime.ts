@@ -240,6 +240,8 @@ export function resolveParams(regime: number): ResolvedParams {
     // Not density-dependent: whether a post will happen at all does not become
     // a different question at scale.
     completionFloor: CONSTANTS.score.completionFloor,
+    repeatableContextWeight: CONSTANTS.score.rRepeat.repeatableContext,
+    repeatableContextDamping: CONSTANTS.score.repeatableContextDamping,
     exhaustionRate: resolve(s.exhaustionRate, t),
     noveltyBoost: resolve(s.noveltyBoost, t),
     // Not density-dependent: the funnel is either in force or it is not, and
