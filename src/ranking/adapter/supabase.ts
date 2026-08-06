@@ -49,6 +49,8 @@ export interface SupabaseLikeQuery {
   eq(column: string, value: unknown): SupabaseLikeQuery;
   in(column: string, values: readonly unknown[]): SupabaseLikeQuery;
   gte(column: string, value: unknown): SupabaseLikeQuery;
+  /** Added in v1.9 for the `loadCandidates` bounding box. See PERF.md §1. */
+  lte(column: string, value: unknown): SupabaseLikeQuery;
   order(column: string, opts?: { ascending?: boolean }): SupabaseLikeQuery;
   limit(count: number): SupabaseLikeQuery;
   maybeSingle(): PromiseLike<{ data: unknown; error: unknown }>;
@@ -195,6 +197,47 @@ export function rowToInterestEvent(row: Row): InterestEvent {
 // Port
 // ---------------------------------------------------------------------------
 
+/** A latitude/longitude box in degrees. Inclusive on all four sides. */
+export interface SpatialBounds {
+  minLat: number;
+  maxLat: number;
+  minLng: number;
+  maxLng: number;
+}
+
+/**
+ * Raised through `onError` when a full candidate page comes back and no
+ * bounding box was supplied — i.e. the exact condition under which the deck
+ * silently stops being proximity-filtered. Distinct string so the app can alert
+ * on it rather than treating it as one more transient query failure.
+ */
+export const SPATIAL_FILTER_UNBOUNDED = 'loadCandidates:unbounded-full-page';
+
+/**
+ * Page size for the candidate pull. Named because the failure mode in PERF.md
+ * §1 is precisely "the page filled up", and a magic 500 buried in a query chain
+ * makes that condition impossible to talk about.
+ */
+export const CANDIDATE_LIMIT = 500;
+
+/**
+ * How far back `seenHostIds` looks. PERF.md §2.
+ *
+ * 90 days because `neverShownToViewer` is a fairness signal rather than a
+ * memory — a host the viewer has not seen in three months is functionally
+ * fresh to them.
+ */
+export const SEEN_HOST_WINDOW_DAYS = 90;
+
+/**
+ * Belt and braces on the same query. The window bounds it in TIME; this bounds
+ * it in ROWS, so a single hyperactive account cannot reintroduce the unbounded
+ * transfer inside the window. Truncation is safe here in a way it is not
+ * elsewhere: a missing id makes a host read as fresh, which is the direction
+ * that shows someone MORE new hosts rather than hiding posts.
+ */
+export const SEEN_HOST_ROW_LIMIT = 5_000;
+
 export interface SupabasePortOptions {
   /**
    * Resolve an activity row to the metrics it speaks to. Defaults to
@@ -212,11 +255,48 @@ export interface SupabasePortOptions {
    */
   distanceMiles: (row: Row) => number;
 
+  /**
+   * The viewer's bounding box, for SERVER-SIDE spatial filtering.
+   *
+   * WHY THIS EXISTS (PERF.md §1, the audit's most important finding).
+   *
+   * `loadCandidates` pages with `limit(CANDIDATE_LIMIT) order by starts_at`.
+   * That limit is ordered by TIME, not distance. Once the activity count
+   * exceeds the limit, the page is the soonest-starting posts GLOBALLY — and
+   * the shipped algorithm is proximity-first, so it then sorts a set that was
+   * never filtered by proximity. A user in Brooklyn with 200 posts inside their
+   * radius can receive a page containing almost none of them.
+   *
+   * That is a correctness bug, not a speed one, and it degrades SILENTLY as the
+   * map fills in. There is no error, no slow query, and no way to see it from
+   * the client except that the deck quietly stops being local.
+   *
+   * Returning `null` disables spatial filtering and restores the old behaviour
+   * — correct while the whole activity table fits inside one page, and wrong
+   * afterwards. `loadCandidates` therefore raises a diagnostic through
+   * `onError` at exactly the moment it starts to matter: a full page came back
+   * and no box was supplied. See `SPATIAL_FILTER_UNBOUNDED`.
+   *
+   * Units are degrees. The app owns the projection because the app owns the
+   * geo library; a degree of longitude is not a degree of latitude outside the
+   * equator, and this module is not going to pretend otherwise.
+   */
+  viewerBounds?: (userId: UserId) => SpatialBounds | null;
+
   /** Generate an id for a new row. Injected: core/ and adapter/ own no UUID impl. */
   newId: () => string;
 
   /** How far back to pull candidate activities, in days. */
   candidateWindowDays?: number;
+
+  /**
+   * Clock. `loadCandidates` receives `now` as a parameter; `loadViewer` does
+   * not, and needs one for the `seenHostIds` window. Injected rather than
+   * calling `Date.now()` inline so the window is testable — the purity test
+   * only guards `core/`, but "the adapter is allowed to" is a poor reason to
+   * make a query untestable.
+   */
+  now?: () => number;
 }
 
 /**
@@ -233,6 +313,7 @@ export function createSupabaseRankingPort(
 ): RankingDataPort {
   const metricsFor = options.metricsForActivity ?? ((row: Row) => [str(row['category'])]);
   const windowDays = options.candidateWindowDays ?? 30;
+  const clock = options.now ?? (() => Date.now());
 
   const fail = (where: string, error: unknown) => { onError?.(where, error); };
 
@@ -259,11 +340,28 @@ export function createSupabaseRankingPort(
         const ideal = row[c.idealSaturday];
 
         // Hosts the viewer has already been shown, from the impression log.
+        //
+        // PERF.md §2. This was unbounded: every impression the user had ever
+        // received, over the wire, to build a Set of a couple of hundred ids.
+        // At 30 cards a day that is ~11,000 rows a year and it never plateaus —
+        // fine in every test, and eventually fine in no production.
+        //
+        // The window is the fix, and it is also more correct. `neverShownToViewer`
+        // is a FAIRNESS signal, not a memory: a host the viewer has not seen in
+        // three months is functionally fresh to them, and treating them as
+        // already-seen forever means a host who had one bad week is permanently
+        // stale to everyone who scrolled past them once.
+        //
+        // Needs `ranking_events_user_seen_idx` (PERF.md §4) or this trades an
+        // unbounded transfer for a sequential scan.
+        const seenSince = toIso(clock() - SEEN_HOST_WINDOW_DAYS * 86_400_000);
         const seen = await client
           .from(COLUMNS.rankingEvents.table)
           .select('host_id')
           .eq('user_id', userId)
-          .eq('event_type', 'impression');
+          .eq('event_type', 'impression')
+          .gte('created_at', seenSince)
+          .limit(SEEN_HOST_ROW_LIMIT);
         const seenRows = ((seen as unknown as { data: Row[] | null }).data) ?? [];
 
         return {
@@ -284,14 +382,44 @@ export function createSupabaseRankingPort(
       try {
         const a = COLUMNS.activities;
         const since = toIso(opts.now - windowDays * 86_400_000);
-        const res = await client
+        const bounds = options.viewerBounds?.(userId) ?? null;
+
+        // PERF.md §1. The box goes in the WHERE clause so the limit applies to
+        // posts the viewer could actually attend, rather than to the soonest
+        // posts on earth. Postgres uses `activities_geo_idx` for the lat range
+        // and filters lng within it.
+        let query = client
           .from(a.table)
           .select('*')
-          .gte(a.startsAt, since)
+          .gte(a.startsAt, since);
+
+        if (bounds) {
+          query = query
+            .gte(a.lat, bounds.minLat).lte(a.lat, bounds.maxLat)
+            .gte(a.lng, bounds.minLng).lte(a.lng, bounds.maxLng);
+        }
+
+        const res = await query
           .order(a.startsAt, { ascending: true })
-          .limit(500);
+          .limit(CANDIDATE_LIMIT);
 
         const rows = ((res as unknown as { data: Row[] | null }).data) ?? [];
+
+        // The alarm, raised only when the bug is actually live: a full page
+        // means the limit bound the result, and no box means it was bound by
+        // time. Below the limit the unfiltered query is exactly correct, which
+        // is why this cannot simply warn on a missing box at construction.
+        if (!bounds && rows.length >= CANDIDATE_LIMIT) {
+          fail(
+            SPATIAL_FILTER_UNBOUNDED,
+            new Error(
+              `loadCandidates returned a full page of ${CANDIDATE_LIMIT} with no ` +
+              'viewerBounds. The page is now the soonest-starting activities ' +
+              'globally, not the nearest, and a proximity-first deck built from ' +
+              'it is wrong rather than slow. Supply SupabasePortOptions.viewerBounds.',
+            ),
+          );
+        }
 
         return rows
           .filter((row) => str(row[a.hostId]) !== userId)
