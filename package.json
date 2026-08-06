@@ -13,7 +13,8 @@
     "sim": "tsx scripts/simulate.ts",
     "backfill": "tsx scripts/backfill-interest-events.ts",
     "sweep": "tsx scripts/sweep.ts",
-    "graph:rebuild": "tsx scripts/rebuild-graph-edges.ts"
+    "graph:rebuild": "tsx scripts/rebuild-graph-edges.ts",
+    "podium": "tsx scripts/podium.ts"
   },
   "dependencies": {},
   "devDependencies": {

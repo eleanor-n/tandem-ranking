@@ -608,20 +608,37 @@ function mean(xs: number[]): number {
 // Aggregation and reporting
 // ---------------------------------------------------------------------------
 
+/**
+ * The metrics that get a standard error. Everything a conclusion is ever drawn
+ * from belongs in here.
+ *
+ * v1.9 NOTE — this list used to be two entries long, and `hostRetention` was
+ * not one of them. The §4.4 proximity sweep had already demonstrated the failure
+ * (three densities, three "optima", all inside the seed-to-seed spread), the
+ * 2 SE gate was built in response, and then the gate was wired to
+ * `retentionAfterEmpty` while every headline table in DIAGNOSTICS.md ranked arms
+ * by `hostRetention` — a metric with no error bar computed anywhere in the file.
+ *
+ * The comparison table in the v1.8 report ordered four arms across a 0.040 span
+ * on exactly that basis. Hence: every metric, or the gate is decorative.
+ */
+const SE_METRICS = [
+  'hostRetention',
+  'retentionAfterEmpty',
+  'repeatRate',
+  'zeroJoinerRate',
+  'survivingHostFraction',
+  'hostGini',
+  'deckRelevance',
+  'tandemsPerUser',
+] as const;
+
+type SeMetric = (typeof SE_METRICS)[number];
+
 interface Aggregate extends Omit<Result, 'seed'> {
   seeds: number;
-  /**
-   * Standard error of the mean across seeds, for the two headline metrics.
-   *
-   * Without this a sweep will happily report an "optimum" that is the largest
-   * of fifteen noise draws. The §4.4 proximity sweep did exactly that on its
-   * first run — it named three different optima at three densities, all of them
-   * inside the seed-to-seed spread, and announced that the scaled pair was
-   * therefore justified. It is not enough to compute a maximum; you have to know
-   * whether the maximum means anything.
-   */
-  retentionAfterEmptySe: number;
-  repeatRateSe: number;
+  /** Standard error of the mean across seeds, per headline metric. */
+  se: Record<SeMetric, number>;
 }
 
 /** Standard error of the mean. Returns 0 for fewer than two samples. */
@@ -656,13 +673,39 @@ function aggregate(results: Result[]): Aggregate {
     deckRelevance: avg((r) => r.deckRelevance),
     meanCoverage: avg((r) => r.meanCoverage),
     meanRegime: avg((r) => r.meanRegime),
-    retentionAfterEmptySe: stderr(results.map((r) => r.retentionAfterEmpty)),
-    repeatRateSe: stderr(results.map((r) => r.repeatRate)),
+    se: Object.fromEntries(
+      SE_METRICS.map((m) => [m, stderr(results.map((r) => r[m]))]),
+    ) as Record<SeMetric, number>,
   };
+}
+
+/**
+ * Is `a` above `b` by more than the noise?
+ *
+ * Two-sample: the SE of a difference of independent means is the root of the
+ * sum of squares, not either one alone. Comparing a gap against a single arm's
+ * SE understates the bar by up to a factor of root two, which over a 0.011 gap
+ * is the whole question.
+ *
+ * Paired seeds would be tighter — every arm runs the same population from the
+ * same seed, so the seed effect is common and could be differenced out. This is
+ * deliberately the unpaired, more conservative test: the paired version would
+ * need the per-seed vectors carried through aggregation, and a separation claim
+ * should not rest on the more generous of two available tests.
+ */
+function separates(a: Aggregate, b: Aggregate, metric: SeMetric, bar = 2): boolean {
+  const gap = Math.abs(a[metric] - b[metric]);
+  const noise = Math.sqrt(a.se[metric] ** 2 + b.se[metric] ** 2);
+  if (noise === 0) return gap > 0;
+  return gap > bar * noise;
 }
 
 const n3 = (x: number) => x.toFixed(3);
 const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
+/** `0.970 ±0.004`. The bar a gap has to clear is 2x this, and two-sample. */
+const pm = (x: number, se: number) => `${x.toFixed(3)} ±${se.toFixed(3)}`;
+const pmPct = (x: number, se: number) =>
+  `${(x * 100).toFixed(1)}% ±${(se * 100).toFixed(1)}`;
 
 function markdownTable(rows: Aggregate[]): string {
   const out: string[] = [];
@@ -681,14 +724,14 @@ function markdownTable(rows: Aggregate[]): string {
         `| ${isFirst ? n3(anchor?.meanCoverage ?? 0) : ''}`,
         `| ${isFirst ? n3(anchor?.meanRegime ?? 0) : ''}`,
         `| ${row.arm === 'shipped' ? `**${row.arm}**` : row.arm}`,
-        `| **${n3(row.hostRetention)}**`,
-        `| ${n3(row.retentionAfterEmpty)}`,
-        `| ${n3(row.repeatRate)}`,
+        `| **${pm(row.hostRetention, row.se.hostRetention)}**`,
+        `| ${pm(row.retentionAfterEmpty, row.se.retentionAfterEmpty)}`,
+        `| ${pm(row.repeatRate, row.se.repeatRate)}`,
         `| ${n3(row.tandemsPerUser)}`,
-        `| ${pct(row.zeroJoinerRate)}`,
+        `| ${pmPct(row.zeroJoinerRate, row.se.zeroJoinerRate)}`,
         `| ${pct(row.survivingHostFraction)}`,
-        `| ${n3(row.hostGini)}`,
-        `| ${n3(row.deckRelevance)} |`,
+        `| ${pm(row.hostGini, row.se.hostGini)}`,
+        `| ${pm(row.deckRelevance, row.se.deckRelevance)} |`,
       ].join('').trim());
     }
   }
@@ -702,20 +745,98 @@ function csv(rows: Aggregate[]): string {
     'repeat_rate', 'tandems_per_user',
     'zero_joiner_rate', 'surviving_host_fraction', 'host_gini', 'deck_relevance',
     'impressions', 'joins', 'completions', 'repeats',
+    ...SE_METRICS.map((m) => `se_${m}`),
   ].join(',');
+
+  // SIX decimals, not three.
+  //
+  // The CSV is a data artifact that other tools do arithmetic on; the markdown
+  // table is the display artifact. Rounding the data to display precision meant
+  // `podium.ts` — comparing a 0.022 gap against a 0.0215 bar — was deciding
+  // separation in a digit the file did not carry, and disagreed with the sweep's
+  // own in-memory podium on that pair. Same defect as the one this whole pass is
+  // about: a comparison reported at a precision that cannot support it.
+  const n6 = (x: number) => x.toFixed(6);
 
   const lines = rows.map((r) => [
     r.users, r.arm, r.seeds,
     n3(r.meanCoverage), n3(r.meanRegime),
-    n3(r.hostRetention), Math.round(r.retentionDenominator),
-    n3(r.retentionAfterEmpty), Math.round(r.emptyFirstPostHosts),
-    n3(r.repeatRate), n3(r.tandemsPerUser),
-    n3(r.zeroJoinerRate), n3(r.survivingHostFraction), n3(r.hostGini), n3(r.deckRelevance),
+    n6(r.hostRetention), Math.round(r.retentionDenominator),
+    n6(r.retentionAfterEmpty), Math.round(r.emptyFirstPostHosts),
+    n6(r.repeatRate), n6(r.tandemsPerUser),
+    n6(r.zeroJoinerRate), n6(r.survivingHostFraction), n6(r.hostGini), n6(r.deckRelevance),
     Math.round(r.impressions), Math.round(r.joins),
     Math.round(r.completions), Math.round(r.repeats),
+    ...SE_METRICS.map((m) => n6(r.se[m])),
   ].join(','));
 
   return [header, ...lines].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// The podium
+// ---------------------------------------------------------------------------
+
+/**
+ * Rank the arms on a metric and say WHICH ADJACENT PAIRS ARE ACTUALLY ORDERED.
+ *
+ * A sorted list of point estimates always looks like a ranking. This prints the
+ * ranking with the separations marked, so that "best" is a claim with a test
+ * behind it rather than a consequence of sorting.
+ *
+ * Adjacent-pair testing is the right granularity: if A does not separate from B
+ * and B does not separate from C, the podium's top is a three-way tie regardless
+ * of whether A separates from C.
+ */
+function podium(rows: Aggregate[], metric: SeMetric, higherIsBetter = true): string[] {
+  const out: string[] = [];
+  const sorted = rows.slice().sort((a, b) =>
+    higherIsBetter ? b[metric] - a[metric] : a[metric] - b[metric]);
+
+  out.push(`  ${metric} @ N=${sorted[0]?.users}, ${sorted[0]?.seeds} seeds ` +
+    `(${higherIsBetter ? 'higher' : 'lower'} is better)`);
+
+  // Walk down the order, breaking it into blocks of mutually-unseparated arms.
+  const blocks: Aggregate[][] = [];
+  let block: Aggregate[] = [];
+  for (const row of sorted) {
+    const prev = block[block.length - 1];
+    if (prev && separates(prev, row, metric)) {
+      blocks.push(block);
+      block = [];
+    }
+    block.push(row);
+  }
+  if (block.length > 0) blocks.push(block);
+
+  let place = 1;
+  for (const b of blocks) {
+    const tied = b.length > 1;
+    for (const row of b) {
+      out.push(
+        `    ${tied ? `=${place}` : ` ${place}`}  ${row.arm.padEnd(18)} ` +
+        `${pm(row[metric], row.se[metric])}`,
+      );
+    }
+    if (tied) {
+      out.push(`         ^ ${b.length}-way tie: no adjacent gap clears 2 SE`);
+    }
+    place += b.length;
+  }
+
+  const top = blocks[0] as Aggregate[];
+  out.push('');
+  if (top.length === 1) {
+    out.push(`    VERDICT: ${top[0]?.arm} is best, separated from the field.`);
+  } else if (top.length === sorted.length) {
+    out.push('    VERDICT: NOT IDENTIFIED. No arm separates from any other on ' +
+      'this metric. Nothing about the ordering is supported.');
+  } else {
+    out.push(`    VERDICT: NOT IDENTIFIED at the top. ` +
+      `${top.map((r) => r.arm).join(', ')} are tied for first; ` +
+      `the winner is not determined by this data.`);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -792,7 +913,7 @@ async function proximitySweep(opts: Options): Promise<void> {
     const median = values[Math.floor(values.length / 2)] as number;
     const best = cells.reduce((a, b) =>
       b.agg.retentionAfterEmpty > a.agg.retentionAfterEmpty ? b : a);
-    const noise = mean(cells.map((c) => c.agg.retentionAfterEmptySe));
+    const noise = mean(cells.map((c) => c.agg.se.retentionAfterEmpty));
     const margin = best.agg.retentionAfterEmpty - median;
 
     if (margin > NOISE_MULTIPLE * noise) {
@@ -843,6 +964,24 @@ async function main(): Promise<void> {
   console.log(`  PRIMARY METRIC: host retention (repeat rate is secondary — see the header)`);
   if (opts.exhaustionOn) console.log('  §4.2 COUNTERFACTUAL: exhaustion re-enabled at v1.6 rates');
   if (opts.proximityWeight !== null) console.log(`  w_proximity forced to ${opts.proximityWeight}`);
+
+  // EFFECTIVE CONFIG, always printed.
+  //
+  // A flag left unset silently inherits constants.ts. That is fine until
+  // constants.ts changes underneath a long run — which happened during the v1.9
+  // pass: a 24-seed sweep was launched, `hostAcceptDamping` was edited an hour
+  // later as part of the §1.5 abort, and the ablation invocations that had not
+  // started yet would have picked up the new value and been quietly compared
+  // against arms measured at the old one. Nothing in the output would have said
+  // so. Now it does.
+  const eff = (v: number | null, fallback: number) =>
+    v === null ? `${fallback} (from constants)` : `${v} (pinned)`;
+  console.log('');
+  console.log('  effective funnel config:');
+  console.log(`    rho                      ${eff(opts.rho, CONSTANTS.features.acceptance.hostAcceptDamping)}`);
+  console.log(`    repeatableContextWeight  ${eff(opts.repeatableContextWeight, CONSTANTS.score.rRepeat.repeatableContext)}`);
+  console.log(`    demandWeight             ${eff(opts.demandWeight, CONSTANTS.collapsed.demandWeight)}`);
+  console.log(`    funnelExponent           ${eff(opts.funnelExponent, CONSTANTS.shipping.funnelExponent)}`);
   console.log('');
   for (const arm of opts.arms) console.log(`  ${arm.padEnd(19)} ${ARM_NOTES[arm]}`);
   console.log('');
@@ -868,17 +1007,44 @@ async function main(): Promise<void> {
   const table = markdownTable(aggregates);
   console.log(`\n${table}\n`);
 
+  // The podium, per size, on the primary metric and on the fairness metric.
+  console.log('=== SEPARATION (2 SE, two-sample, adjacent pairs) ===');
+  for (const users of opts.sizes) {
+    const group = aggregates.filter((x) => x.users === users);
+    if (group.length < 2) continue;
+    for (const line of podium(group, 'hostRetention')) console.log(line);
+    console.log('');
+    for (const line of podium(group, 'hostGini', false)) console.log(line);
+    console.log('');
+  }
+
   // §4.3: losing to random is a BUG, not a design failure. Say so loudly.
+  //
+  // GATED as of v1.9. This check used to be a bare `<` on two point estimates,
+  // which is how it came to print
+  //     "shipped loses to random at N=20 (0.833 vs 0.833)"
+  // — two numbers that render identically, separated by a float comparison, in
+  // the same output that the comparison table was built from. An alarm that
+  // fires on a gap of 1e-16 trains you to skim past it, which is worse than not
+  // having it.
   for (const users of opts.sizes) {
     const random = aggregates.find((x) => x.users === users && x.arm === 'random');
     if (!random) continue;
     for (const arm of ['shipped', 'ranker_repaired', 'ranker_no_funnel'] as Arm[]) {
       const row = aggregates.find((x) => x.users === users && x.arm === arm);
-      if (row && row.hostRetention < random.hostRetention) {
+      if (!row || row.hostRetention >= random.hostRetention) continue;
+      if (separates(row, random, 'hostRetention')) {
         console.log(
           `!! BUG SUSPECTED: ${arm} loses to random on host retention at N=${users} ` +
-          `(${n3(row.hostRetention)} vs ${n3(random.hostRetention)}). ` +
+          `(${pm(row.hostRetention, row.se.hostRetention)} vs ` +
+          `${pm(random.hostRetention, random.se.hostRetention)}, clears 2 SE). ` +
           'Investigate before reporting anything else.',
+        );
+      } else {
+        console.log(
+          `   (below random but inside noise: ${arm} at N=${users}, ` +
+          `${pm(row.hostRetention, row.se.hostRetention)} vs ` +
+          `${pm(random.hostRetention, random.se.hostRetention)} — not a finding either way)`,
         );
       }
     }
