@@ -564,8 +564,10 @@ tandems creates more posts through supply response, so **the best-performing
 configurations were the slowest to measure** — a harness whose cost correlates
 with the result selects which results get collected.
 
-**The worry was justified. One of the two dropped ablations is the best
-configuration measured anywhere in this build.**
+**The worry was justified for one of the two.** Ablation C is the best
+configuration measured anywhere in this build; ablation D confirmed a known
+relationship and changed nothing. One for two is exactly the hit rate that makes
+dropping work for time a bad trade.
 
 N=600, six seeds, `ranker_repaired` with the stated overrides:
 
@@ -600,6 +602,27 @@ true and is not the same claim as "demand balancing does not work".
 It costs repeat rate (0.316 against `shipped`'s 0.515) and some deck relevance
 (0.135 vs 0.161), which is the trade this configuration is making — fewer,
 better-spread joins.
+
+### Ablation D — half funnel
+
+The second dropped ablation. N=600, six seeds, alongside the two endpoints
+already measured:
+
+| funnelExponent | retention | repeat | zero-joiner | hosts alive | Gini | relevance |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1.0 *(`ranker_repaired`)* | 0.838 | 0.440 | 33.5% | 15.9% | 0.842 | 0.114 |
+| **0.5 *(ablation D)*** | **0.878** | 0.412 | 22.6% | 29.5% | 0.727 | 0.126 |
+| 0.0 *(`ranker_no_funnel`)* | 0.946 | 0.367 | 9.8% | 58.7% | 0.429 | 0.141 |
+
+**This one genuinely did not matter.** It is monotone between the endpoints on
+every metric and reproduces the N=300 dose–response from v1.7 §D3 at a second
+population size, which is worth having and changes nothing.
+
+One detail it does add: at half strength the funnel **clears the `random`
+floor** (0.878 against 0.860) where at full strength it does not (0.838). The
+guard failure is not a cliff — it is the same monotone relationship crossing a
+threshold, which is consistent with everything else here and inconsistent with
+there being a bug.
 
 ### A note on how this was almost missed twice
 
