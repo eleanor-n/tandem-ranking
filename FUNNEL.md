@@ -1,0 +1,282 @@
+# FUNNEL
+
+The v1.8 repair of the defect v1.7 §D3 measured, and what the measurement says
+about it.
+
+**Headline, up front: the repair works in shape and fails at its shipped
+setting.** At ρ = 0.5 the host-attention Gini is 0.821, above the ~0.75 bar set
+for "the repair failed and the terms should be dropped rather than repaired".
+The dose–response says why, and points at a specific configuration that is not
+"drop it" and not "keep it as shipped". Details in §4.
+
+Nothing here has been tuned. Every number came from `RankOptions.paramsOverride`
+and every constant is where it was before the diagnostics ran.
+
+---
+
+## 1. The defect, stated so the fix follows from it
+
+A ranker in a two-sided marketplace does two jobs:
+
+| | |
+|---|---|
+| **relevance** | which of these is best *for this viewer* — per-viewer |
+| **allocation** | who gets seen at all, across all viewers — population-level |
+
+A product of per-viewer scores can only do the first. Any factor in that product
+whose value does not depend on the viewer performs allocation **as an invisible
+side effect** — every client independently sorts the same items upward, because
+every client was handed the same preference order.
+
+`P_accept`, `P_complete` and `repeatableContext` were viewer-independent. The
+consequence, measured: Gini 0.931, losing to `random` on host retention, and
+**deck relevance *lower* than with the terms removed** (0.094 vs 0.128). That
+last part is what settles it. It was never a fairness-versus-relevance trade;
+the terms were displacing wanted cards *and* concentrating attention at once.
+
+### Where it came from
+
+The funnel is borrowed from dating-app ranking, where `P_accept` is genuinely
+two-sided: does *this* person accept *you*. In Tandem it collapsed to
+`hostReliability` — one global scalar per host — while keeping the architecture
+that two-sidedness had justified. What was left is a popularity multiplier
+wearing a two-sided model's clothes.
+
+So the repair is not deletion. It is restoring the viewer-dependence that made
+the term valid, and reclassifying what genuinely cannot be made viewer-dependent.
+
+---
+
+## 2. The score, before and after
+
+**Before (v1.7):**
+
+```
+S = P_join(viewer)
+  × P_accept          = hostReliability(host) × (verified ? 1.05 : 1)
+  × P_complete        = 0.7·completionPrior(host) + 0.3·freshness(post)
+  × R_repeat          = 1 + 0.25·repeatableContext(category) + 0.25·rhythmOverlap(pair)
+  × exposureBoost
+  × demandMultiplier
+```
+
+Three of the five factors are viewer-independent quality terms.
+
+**After (v1.8):**
+
+```
+S = P_join(viewer)
+  × P_accept          = hostRank^ρ × (1 + pickiness · viewerDeviation(viewer, host))
+                        where pickiness = 1 − hostRank
+  × R_repeat          = 1 + w·rank(repeatableContext)^δ + 0.25·rhythmOverlap(pair)
+  × exposureBoost
+  × demandMultiplier
+
+ordered by:  (P_complete ≥ completionFloor) DESC, S DESC, activityId ASC
+```
+
+`P_complete` left the product entirely and became an ordering key.
+
+---
+
+## 3. The classification table
+
+| term | class | how it reaches the deck |
+|---|---|---|
+| `categoryAffinity` | per-viewer | summed in P_join |
+| `intentMatch` | per-viewer | summed in P_join |
+| `proximity` | per-viewer | summed in P_join |
+| `timeFit` | per-viewer | summed in P_join |
+| `socialContext` | pairwise | summed in P_join |
+| `rhythmOverlap` | pairwise | multiplier, via `R_repeat` |
+| `graphAffinity` | pairwise | stub, weight 0 |
+| `acceptLikelihood` | **pairwise** *(was global-quality)* | multiplier |
+| `hostReliability` | global-quality | **only inside** `acceptLikelihood` |
+| `completionPrior` | global-quality | **gate** |
+| `freshness` | global-quality | **gate** |
+| `repeatableContext` | global-quality | logged only |
+| `repeatableContextRank` | global-quality | **dampened multiplicand** (provisional) |
+| `exposureBoost` | global-allocation | multiplier — allowed |
+| `demandMultiplier` | global-allocation | multiplier — allowed |
+
+### Why four classes and not three
+
+`exposureBoost` and the demand terms are viewer-independent too, and they are
+fine. They *are* the allocation job, done on purpose, by terms whose entire
+content is population state. Banning them would ban the only machinery that
+pushes back on concentration.
+
+So the rule is **no global *quality* multipliers**. A global term ranking items
+by how good they are is the defect; one ranking them by how under-served they
+are is the corrective. Opposites.
+
+### Enforcement
+
+`score.ts` declares `MULTIPLICATIVE_LEAVES` — the *leaf* terms in the product,
+not the composites, because a composite hides what it is made of and hiding is
+how `completionPrior` became a global quality multiplier without anyone choosing
+that. `assertNoGlobalQualityMultipliers` runs at module load and the count is
+now zero, so the guard is **armed**: a future edit that multiplies in a quality
+score crashes on import.
+
+Four declared routes to the deck, each stating its own justification:
+
+| list | admits | why it is safe |
+|---|---|---|
+| `PJOIN_SUMMANDS` | per-viewer, pairwise | a weighted **sum** of per-viewer terms is per-viewer |
+| `MULTIPLICATIVE_LEAVES` | per-viewer, pairwise, global-**allocation** | no consensus, or consensus that spreads |
+| `GATE_TERMS` | global-quality | a **sort key** cannot compound |
+| `DAMPENED_MULTIPLICANDS` | global-quality, rank-normalised, exponent < 1 | **provisional — see §5** |
+
+---
+
+## 4. ρ — the measurement that decides whether §1.2 is the right repair
+
+`P_accept = hostRank^ρ × (1 + pickiness · viewerDeviation)`.
+
+ρ = 0 flattens the host term entirely; ρ = 1 is the raw rank. N=300, six seeds,
+via `--rho`:
+
+| ρ | host retention | repeat rate | tandems/user | zero-joiner | hosts alive | **Gini** | deck relevance |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| **0.00** | **0.922** | 0.409 | 13.98 | **16.7%** | **46.4%** | **0.511** | **0.117** |
+| 0.25 | 0.881 | 0.452 | 14.91 | 24.0% | 30.7% | 0.719 | 0.111 |
+| **0.50** *(shipped)* | 0.848 | 0.474 | 15.04 | 32.9% | 19.3% | **0.821** | 0.104 |
+| 0.75 | 0.823 | 0.493 | 14.39 | 39.4% | 13.1% | 0.874 | 0.097 |
+| 1.00 | 0.814 | 0.475 | 13.42 | 43.9% | 11.1% | 0.892 | 0.091 |
+
+**Monotone on five metrics simultaneously**, every one favouring ρ = 0. Repeat
+rate is the lone dissenter, peaking at ρ = 0.75 — the same split v1.7 §D3 found,
+where the funnel bought repeat rate and paid for it in concentration.
+
+### The verdict, against the stated criterion
+
+> *"If Gini stays above ~0.75, the repair failed and the terms should be dropped
+> rather than repaired."*
+
+At the shipped ρ = 0.5, **Gini is 0.821. By that criterion the repair failed.**
+
+### But it fails informatively, and "drop it" is not what the data says
+
+ρ = 0 does **not** delete `hostReliability`. It removes it as a **main effect**
+while `pickiness = 1 − hostRank` retains it as an **interaction**. The
+configuration the data points at is:
+
+> A host's accept rate determines **how much your record matters to them**, and
+> never makes their card better or worse on its own.
+
+Which is exactly what §3's classification predicts. A main effect of a
+host-only quantity is global-quality. An interaction between a host-only
+quantity and a viewer-dependent one is pairwise. The repair's *shape* was right
+— the pickiness factor is what earned the reclassification, and it survives at
+ρ = 0. Its *magnitude* was wrong, and the correct magnitude is zero.
+
+That is a more useful answer than "drop the terms", because it says which half
+to drop.
+
+**Not acted on.** `hostAcceptDamping` remains 0.5 in `constants.ts`. Changing it
+would be tuning a constant to improve a metric, which this build is explicitly
+not doing, and the change should be made against real `ranking_events` labels
+rather than against a simulator that was authored alongside the ranker it
+grades.
+
+---
+
+## 5. `repeatableContext` — kept vs dropped
+
+N=300, six seeds, via `--repeatable-context`:
+
+| weight | retention | retention after empty | repeat rate | tandems/user | zero-joiner | hosts alive | Gini | relevance |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.25 *(kept)* | 0.848 | 0.763 | 0.474 | 15.04 | 32.9% | 19.3% | 0.821 | 0.104 |
+| 0.00 *(dropped)* | 0.855 | 0.763 | 0.471 | 14.77 | 32.2% | 19.3% | 0.817 | 0.104 |
+
+**Indistinguishable on every metric.** Retention differs by 0.007, Gini by
+0.004, relevance not at all.
+
+The term buys nothing measurable and costs a `global_quality` entry in the
+classification — which is not free, because `DAMPENED_MULTIPLICANDS` is the one
+route to the deck whose safety argument is "less of a bad thing" rather than
+"not a bad thing".
+
+**Recommendation: drop it.** `repeatableContextWeight: 0`, which empties
+`DAMPENED_MULTIPLICANDS` and removes the provisional category entirely.
+
+Worth naming what is being given up. `repeatableContext` is the most
+product-shaping constant in the system — it is what makes a Tuesday study
+session outrank a Saturday concert, and the strategic bet that habit beats
+excitement for friendship formation. That bet may well be right. What this says
+is only that **as a dampened global multiplier it does not express the bet**:
+three distinct values across fourteen categories, rank-normalised and raised to
+0.5, moves nothing. If the bet is worth making it should be made somewhere that
+can carry it — `CATEGORY_REPEATABILITY` feeding retrieval, or the interest
+model's source weights — not as a rounding error on a multiplier.
+
+**Not acted on**, same reason as §4.
+
+---
+
+## 6. The relevance question §1.5 asked
+
+> *"The repaired funnel should recover most of the relevance gain that removing
+> the global terms produced (0.094 → 0.128) without the Gini blowup."*
+
+| configuration | Gini | deck relevance |
+|---|---:|---:|
+| v1.7 funnel, unrepaired *(from §D3, N=300)* | 0.884 | 0.094 |
+| **v1.8 repaired, ρ = 0.5** | **0.821** | **0.104** |
+| v1.8 repaired, ρ = 0 | 0.511 | 0.117 |
+| no funnel at all *(§D3 ablation, N=300)* | 0.484 | 0.128 |
+
+At the shipped setting the repair recovers **29% of the relevance gain** (0.094
+→ 0.104 of a possible 0.094 → 0.128) and **19% of the Gini reduction** (0.884 →
+0.821 of a possible 0.884 → 0.484). That is not "most", and it is the arithmetic
+behind the §4 verdict.
+
+At ρ = 0 it recovers **68% of the relevance** and **93% of the Gini**, which is
+close enough to the no-funnel ablation to say that what remains of the funnel at
+that setting is nearly free.
+
+---
+
+## 7. How much to believe this
+
+Standing caveat, restated because it has not stopped applying:
+
+> The simulator was authored alongside the ranker it evaluates, so results
+> **favouring** the ranker are weak evidence and results **against** it are
+> strong evidence.
+
+Everything decisive above is against the ranker: the repair underperforming its
+own criterion, the dose–response favouring the flattest possible host term, and
+`repeatableContext` measuring as inert. Those are the strong-evidence direction.
+
+The one result that would favour the ranker — repeat rate peaking at ρ = 0.75 —
+is the weak-evidence direction and is also a single metric moving against five
+others. It is reported, and it is not the basis for anything.
+
+One caveat specific to v1.8: **the pre-repair funnel is not reachable through
+`paramsOverride`.** §1.3 removed `P_complete` from the product structurally and
+§1.2 rewrote `P_accept`'s shape, so no parameter setting reconstructs v1.7's
+arithmetic. The comparison in §6 against the unrepaired funnel is made against
+numbers recorded in `DIAGNOSTICS.md` §D3 — same frozen population model, same
+seeds, and (at regime 1) the same parameter values the §2 collapse now uses.
+Directly comparable, but from a different run, and that is a claim doing real
+work rather than an aside.
+
+---
+
+## 8. What would settle it properly
+
+The whole of the above is simulation. The instrumentation shipped in v1.7 exists
+precisely so that these questions stop needing a simulator:
+
+1. **Fit `P_accept` from real labels.** `ranking_events` records every feature at
+   impression time plus the `accept`/`decline` outcome. One logistic regression
+   answers whether `hostReliability` predicts acceptance at all once viewer
+   reputation and category familiarity are in the model — which is the question
+   ρ is a proxy for.
+2. **Watch the production Gini.** `supabase/analysis/concentration.sql`, leading
+   with the zero-impression host count. The simulator's absolute values do not
+   transfer; the *ordering* of the configurations should.
+3. **Then set ρ.** From the fit, not from this table.
