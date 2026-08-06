@@ -666,3 +666,89 @@ completes more tandems triggers more supply response, creates more posts, and
 makes every subsequent lookup slower. **The best-performing ablations were the
 slowest to run**, which is a bad property for a diagnostic harness and had
 already caused two ablations to be abandoned for time before it was fixed.
+
+---
+---
+
+# v1.9 — Separation
+
+Everything above this line reports point estimates. This section is about
+whether any of them were distinguishable, and it is written because the answer
+turned out to be *mostly, but not everywhere, and not where I claimed*.
+
+---
+
+## F0 — The methodology failure that prompted this pass
+
+v1.7 §D4 named three different proximity optima at three densities, all inside
+the seed-to-seed spread. The response was a 2 SE gate, `OPTIMUM UNIDENTIFIABLE`,
+and a comment in `sweep.ts` explaining why a maximum is not a finding.
+
+That gate was then wired to `retentionAfterEmpty` and `repeatRate` — and the
+primary metric changed to **`hostRetention`** in the same build. `hostRetention`
+had no standard error computed anywhere in `sweep.ts`. Every headline table from
+§D1 onward ranked arms by it.
+
+The v1.8 comparison table ordered four arms across a 0.040 span — adjacent gaps
+of 0.013, 0.011 and 0.016 — with no error bars, two passes after the harness had
+demonstrated that a 0.051 spread could invert a verdict.
+
+Three things were wrong, and only the first is interesting:
+
+1. **The gate was pointed at the wrong metric.** Building the safeguard and then
+   not applying it to the number the conclusions rest on is worse than not
+   building it, because the file now *reads* as if noise had been handled.
+2. **The "loses to random" alarm was a bare `<` on two point estimates.** It
+   printed `shipped loses to random at N=20 (0.833 vs 0.833)` — two numbers that
+   render identically at the precision they were reported in. An alarm that
+   fires on a float difference of ~1e-16 trains the reader to skim past it.
+3. **The CSV was written at 3 decimal places** and `podium.ts` then compared a
+   0.0219 gap against a 0.0215 bar — deciding separation in a digit the file did
+   not carry. It disagreed with the in-memory podium on exactly that pair. Fixed
+   by writing 6dp; noted because it is the same error one level down, and I
+   introduced it while fixing the original.
+
+`separates()` is two-sample — `sqrt(sa² + sb²)` — not a gap measured against one
+arm's SE. Paired seeds would be tighter, since every arm runs the same population
+from the same seed and the seed effect could be differenced out. The unpaired
+test is used deliberately: a separation claim should not rest on the more
+generous of two available tests.
+
+---
+
+## F1 — The clipping defect, found by executing the abort
+
+§1.5 pre-registered: *if Gini stays above ~0.75, drop the terms rather than
+repair them.* Gini came in at **0.842 ±0.002**. The abort fired, and setting
+`hostAcceptDamping` to 0 broke three tests in `tests/accept.test.ts`.
+
+They were right and my explanation of ρ=0 was wrong.
+
+```
+P_accept = clamp01( rank^ρ × (1 + pickiness × deviation) )
+```
+
+At ρ=0 the first factor is exactly **1** — the ceiling — so any *positive*
+viewer deviation is clipped straight back to 1.
+
+| ρ | viewer | raw | after clamp |
+|---|---|---:|---:|
+| 0 | category-matching | 1.180 | **1.000** |
+| 0 | neutral | 1.000 | **1.000** |
+| 0.25 | category-matching | 0.664 | 0.664 |
+| 0.25 | neutral | 0.562 | 0.562 |
+
+So ρ=0 keeps the pairwise interaction **only on the downside**: it penalises a
+poor record and cannot reward a good one. FUNNEL.md §4 claimed the interaction
+"survives at ρ = 0". It half survives, and I wrote that sentence before checking
+— again the more flattering of two available readings, which is the third time
+this failure mode appears in this file (§D4, §E5, here).
+
+**Left at 0 anyway, deliberately.** ρ=0 is the value the sweep *measured*; the
+clipping was inside the arm that scored 0.922. Changing the functional form to
+remove the clip would introduce a new design, with no measurement behind it,
+under an abort. The un-clipped form is FUNNEL.md §8 item 0 and is **UNMEASURED**.
+
+The classification is directionally vindicated — the *main effect* was the
+harmful part — but this is weaker evidence for the taxonomy than §E3 made it
+look.
