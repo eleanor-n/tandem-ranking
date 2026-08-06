@@ -81,6 +81,19 @@ Implements steps **1, 2, 3, 5** of the v1.5 framework:
 | ⚠️ | **The funnel factors are the most damaging thing measured in this build.** They are the only *viewer-independent* terms in the score, so a greedy per-viewer ranker turns them into a rich-get-richer loop. Sweeping them out is monotone on five metrics: at N=600 host retention 0.783 → 0.948, zero-joiner posts 51.2% → 9.4%, Gini 0.931 → 0.430 — and deck relevance *rises*. §D3. |
 | ⚠️ | **`w_proximity`'s scaled pair is contradicted and should collapse to a scalar.** No density prefers less proximity; the gain is largest at N=600, which is the opposite of `{village 0.40, city 0.20}`. §D4. |
 
+**v1.9 — separation:**
+
+| | |
+|---|---|
+| ✅ | Standard errors on **every** headline metric, not the two that happened to have them. The 2 SE gate built in v1.7 §D4 had been wired to `retentionAfterEmpty` while every table ranked by `hostRetention`, which had no error bar computed anywhere — [`DIAGNOSTICS.md` §F0](DIAGNOSTICS.md) |
+| ✅ | `podium()` + `npm run podium` — sorts arms, then breaks the order into blocks of mutually unseparated ones and says `NOT IDENTIFIED` rather than naming a winner out of a tie |
+| ✅ | The two **pre-registered aborts executed**: `hostAcceptDamping` 0.5 → 0 (§1.5 fired at Gini 0.842 ±0.002 vs a 0.75 threshold) and `repeatableContextWeight` 0.25 → 0 (§1.4 ran it both ways; nothing separated). Neither is tuning — both are the pre-committed response to a criterion agreed in advance |
+| ✅ | `PERF.md` §1/§2/§4 fixed, sequenced **before** logging is switched on: a candidate set selected by time rather than distance would have contaminated `ranking_events` at the source |
+| ✅ | The adapter has tests for the first time — 11 of them, asserting **queries** rather than results, which is the class of defect it is actually prone to |
+| ✅ | `supabase/analysis/churn-on-empty.sql` — measures `churnPerEmptyPost`, the one authored constant every demand-balancing conclusion is downstream of |
+| ⚠️ | **`P_accept` clips at ρ=0.** `clamp01(rank^ρ × (1 + pickiness × deviation))` pins at the ceiling when ρ=0, so the pairwise interaction survives only on the downside — it can penalise a poor record and cannot reward a good one. Left as measured, since the clipping was inside the arm that won. The un-clipped form is UNMEASURED and is the first thing to run. §F1 |
+| ⚠️ | **`demandWeight` is not being raised on the sim's recommendation.** Its optimum is close to a mechanical function of `churnPerEmptyPost = 0.18`, which was invented. The *direction* is robust; the *magnitude* is downstream of a guess. [`FUNNEL.md` §7](FUNNEL.md) |
+
 > ⚠️ **The v2 framework document was not available when this was built.** Only
 > `tandem-matching-algorithm-v1.md` was. Everything the build prompt specified
 > directly is built to spec; everything only v2 would have contained was
