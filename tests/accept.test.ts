@@ -197,28 +197,80 @@ describe('pickiness is what earns the pairwise reclassification', () => {
     const concert = host('picky', 1, 20, 'concerts');
     const rank = rankOf('picky');
 
-    expect(acceptLikelihood(coffeePoster, coffee, rank))
-      .toBeGreaterThan(acceptLikelihood(coffeePoster, concert, rank));
+    // NOTE the explicit rho. At the SHIPPED rho of 0 this ordering does not
+    // hold — see the clipping test below, which is the reason this one passes
+    // an exponent rather than relying on the constant.
+    expect(acceptLikelihood(coffeePoster, coffee, rank, 0.25))
+      .toBeGreaterThan(acceptLikelihood(coffeePoster, concert, rank, 0.25));
+  });
+
+  it('AT THE SHIPPED rho=0 THE UPSIDE INTERACTION IS CLIPPED AWAY', () => {
+    // This is a KNOWN DEFECT, pinned deliberately rather than fixed, because
+    // rho=0 is the value the §3 sweep measured and the clipping was inside that
+    // measurement. Fixing the form here would invalidate the number that
+    // justified the setting.
+    //
+    //   P_accept = clamp01( rank^rho * (1 + pickiness * deviation) )
+    //
+    // At rho=0 the first factor is 1, so a positive deviation can only push
+    // above the ceiling, where clamp01 removes it. The term becomes one-sided:
+    // it penalises a poor record and cannot reward a good one.
+    const rho = CONSTANTS.features.acceptance.hostAcceptDamping;
+    expect(rho).toBe(0);
+
+    const coffeePoster = { ...makeViewer(), postedCategories: ['coffee'] };
+    const coffee = host('picky', 1, 20, 'coffee');
+    const concert = host('picky', 1, 20, 'concerts');
+    const rank = rankOf('picky');
+
+    // Both pin at 1: the positive deviation is invisible.
+    expect(acceptLikelihood(coffeePoster, coffee, rank)).toBe(1);
+    expect(acceptLikelihood(coffeePoster, concert, rank)).toBe(1);
+
+    // The DOWNSIDE still works, which is why the term is not simply dead.
+    const flake = { ...makeViewer(), acceptedRequests: 50, noShows: 50, verified: false };
+    expect(acceptLikelihood(flake, coffee, rank)).toBeLessThan(1);
+
+    // And with any rho above 0 the upside ordering returns, which localises the
+    // defect precisely to the exponent rather than to the deviation model.
+    expect(acceptLikelihood(coffeePoster, coffee, rank, 0.25))
+      .toBeGreaterThan(acceptLikelihood(coffeePoster, concert, rank, 0.25));
   });
 });
 
+/** A viewer with no history at all: deviation is exactly 0 by construction. */
+function neutral(): Viewer {
+  const v: Viewer = { ...makeViewer(), verified: false };
+  delete (v as { completedTandems?: number }).completedTandems;
+  delete (v as { acceptedRequests?: number }).acceptedRequests;
+  delete (v as { postedCategories?: string[] }).postedCategories;
+  return v;
+}
+
 describe('the damping exponent', () => {
-  it('compresses the spread between the best and worst host', () => {
-    const rho = CONSTANTS.features.acceptance.hostAcceptDamping;
-    expect(rho).toBeGreaterThan(0);
-    expect(rho).toBeLessThanOrEqual(1);
-
+  it('compresses the spread between the best and worst host, in proportion to rho', () => {
     // With a neutral viewer, P_accept is exactly hostRank^rho, so the ratio
-    // between the extremes is compressed by exactly the exponent.
-    const neutralViewer: Viewer = { ...makeViewer(), verified: false };
-    delete (neutralViewer as { completedTandems?: number }).completedTandems;
-    delete (neutralViewer as { acceptedRequests?: number }).acceptedRequests;
-    delete (neutralViewer as { postedCategories?: string[] }).postedCategories;
+    // between the extremes IS the compression, and it is monotone in rho.
+    const spread = (rho: number) =>
+      acceptLikelihood(neutral(), host('b', 20, 20), 1.0, rho) /
+      acceptLikelihood(neutral(), host('w', 0, 20), 0.1, rho);
 
-    const worst = acceptLikelihood(neutralViewer, host('w', 0, 20), 0.1);
-    const best = acceptLikelihood(neutralViewer, host('b', 20, 20), 1.0);
-    expect(best / worst).toBeLessThan(1 / 0.1);      // less than the raw ratio
-    expect(best / worst).toBeGreaterThan(1);          // but still an advantage
+    expect(spread(1)).toBeCloseTo(1 / 0.1, 5);   // undamped: the raw rank ratio
+    expect(spread(0.5)).toBeLessThan(spread(1));
+    expect(spread(0.25)).toBeLessThan(spread(0.5));
+    expect(spread(0)).toBeCloseTo(1, 10);        // fully flattened
+  });
+
+  it('the SHIPPED rho removes the host main effect entirely', () => {
+    // The §1.5 abort. Gini came in at 0.842 against a pre-registered 0.75
+    // ceiling, and the pre-committed response was to drop the term rather than
+    // repair it further. At rho=0 two hosts at opposite ends of the reliability
+    // distribution are worth exactly the same to a viewer with no history.
+    expect(CONSTANTS.features.acceptance.hostAcceptDamping).toBe(0);
+
+    const low = acceptLikelihood(neutral(), host('l', 1, 20), 0.05);
+    const high = acceptLikelihood(neutral(), host('h', 19, 20), 0.95);
+    expect(high).toBe(low);
   });
 
   it('falls back to the raw rate when no population context is supplied', () => {
@@ -268,10 +320,13 @@ describe('invariants', () => {
     expect(acceptLikelihood(worst, host('h', 1, 20), 0.5)).toBeGreaterThan(0);
   });
 
-  it('the host term still ranks hosts, just less steeply', () => {
-    const neutralViewer = makeViewer();
-    const low = acceptLikelihood(neutralViewer, host('l', 1, 20), 0.2);
-    const high = acceptLikelihood(neutralViewer, host('h', 19, 20), 0.9);
+  it('the host term still ranks hosts whenever rho is above zero', () => {
+    // Kept as a property of the FORM rather than of the shipped constant: if
+    // rho is ever raised off the floor, this is the behaviour it must restore.
+    // Asserting it against the live constant is what made this test a
+    // false alarm when the abort fired.
+    const low = acceptLikelihood(makeViewer(), host('l', 1, 20), 0.2, 0.5);
+    const high = acceptLikelihood(makeViewer(), host('h', 19, 20), 0.9, 0.5);
     expect(high).toBeGreaterThan(low);
   });
 });

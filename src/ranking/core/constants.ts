@@ -228,12 +228,64 @@ export const CONSTANTS = {
      */
     acceptance: {
       /**
-       * [UNMEASURED] rho. 0 flattens the host term entirely, 1 is raw rank.
-       * 0.5 halves the spread between the best and worst host in the pool.
-       * v1.8 §3 sweeps it; that sweep is what decides whether this repair is
-       * the right one.
+       * rho. 0 flattens the host term entirely, 1 is raw rank.
+       *
+       * [v1.9 — MEASURED, and set by a pre-registered abort rather than by
+       * tuning.]
+       *
+       * v1.8 §1.5 committed in advance: "If Gini stays above ~0.75, the repair
+       * failed and the terms should be dropped rather than repaired." The §3
+       * sweep then measured, at N=600 over 24 seeds, a host Gini of 0.842
+       * (+/-0.002) at rho=0.5. That is not near the line. The abort fires, and
+       * this is the response the abort specified.
+       *
+       * The dose-response says the same thing from the other direction, and
+       * says it about the mechanism rather than the threshold:
+       *
+       *   rho    retention   zero-joiner   Gini
+       *   0      0.922       16.7%         0.511
+       *   0.5    0.848       32.9%         0.821
+       *   1.0    0.814       43.9%         0.892
+       *
+       * Monotone on five metrics. Every unit of raw host rank left in the
+       * product buys concentration and pays for it in supply.
+       *
+       * WHAT SURVIVES AT ZERO — and this is NOT the clean story it looks like.
+       *
+       * The intended reading is that rho damps the host-rank MAIN EFFECT (the
+       * viewer-independent part, the `global_quality` part, the part that
+       * manufactures consensus) while leaving the INTERACTION intact: a
+       * selective host weighs your record more heavily than an open one does.
+       *
+       * That is not what rho=0 actually does, and the tests caught it.
+       *
+       *   P_accept = clamp01( rank^rho * (1 + pickiness * deviation) )
+       *
+       * At rho=0 the first factor is exactly 1 — the ceiling. So any POSITIVE
+       * viewer deviation multiplies 1 by something >1 and is clipped straight
+       * back to 1 by clamp01. Measured:
+       *
+       *   rho=0     coffee-matching viewer 1.180 -> 1.000
+       *             neutral viewer         1.000 -> 1.000    ordering LOST
+       *   rho=0.25  0.664 vs 0.562                           ordering kept
+       *
+       * So rho=0 keeps the interaction only on the DOWNSIDE. It can penalise a
+       * poor record; it cannot reward a good one, and every above-neutral
+       * viewer is indistinguishable from every other for every host.
+       *
+       * This is left at 0 anyway, deliberately, because 0 is the value the §3
+       * sweep MEASURED — the winning arm had this clipping in it, so 0.922
+       * retention is the number for the clipped form, not for some better one
+       * that has never been run. Setting rho=0 here reproduces the measurement.
+       * Changing the functional form to remove the clip would be a new design
+       * with no measurement behind it, and it is not being done under an abort.
+       *
+       * See DIAGNOSTICS.md §F1. `tests/accept.test.ts` pins the clipping so it
+       * cannot be rediscovered by accident, and FUNNEL.md carries the open
+       * question: whether the un-clipped form beats this one is UNMEASURED, and
+       * it is the first thing to run next.
        */
-      hostAcceptDamping: 0.5,
+      hostAcceptDamping: 0,
 
       /**
        * [new] Saturation constant for viewer experience: sat(n) = n / (n + k).
@@ -533,12 +585,28 @@ export const CONSTANTS = {
     rRepeat: {
       base: 1.0,
       /**
-       * [v1.8 §1.4] Weight on the DAMPENED, RANK-NORMALISED repeatable-context
-       * term. Setting it to 0 drops the term; §3.4 runs it both ways, because
-       * "dampen it" and "delete it" are both defensible and only a measurement
-       * separates them.
+       * Weight on the DAMPENED, RANK-NORMALISED repeatable-context term.
+       *
+       * [v1.9 — DROPPED, executing §1.4's pre-registration.]
+       *
+       * §1.4 said: run it kept and dropped, because "dampen it" and "delete it"
+       * are both defensible and only a measurement separates them. §3.4 ran
+       * both. Nothing separated — every metric landed inside the seed-to-seed
+       * spread in both configurations.
+       *
+       * An inert term is not neutral. It is a `global_quality` entry that costs
+       * a rank-normalisation pass over the candidate pool on every deck build,
+       * carries a damping exponent someone will eventually try to tune, and
+       * stands as a standing invitation to reintroduce the v1.7 defect the next
+       * time somebody decides it "should probably matter more". Dropping it is
+       * simplification, not tuning: the measurement that would justify keeping
+       * it was run, pre-registered, and came back null.
+       *
+       * If it is ever restored, restore it as a rank-normalised term with a
+       * damping exponent — not as a raw multiplier. `classification.ts` will
+       * fail the build otherwise, which is the point of that file.
        */
-      repeatableContext: 0.25,
+      repeatableContext: 0,
       rhythmOverlap: 0.25,
     },
 
