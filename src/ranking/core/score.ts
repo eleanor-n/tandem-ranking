@@ -292,7 +292,7 @@ export function scoreCandidates(
   // Built once per pool. Global-quality terms are only admissible once
   // rank-normalised against the population they claim to rank within, and that
   // population is not visible from inside a per-candidate function.
-  const context = buildScoringContext(candidates);
+  const context = buildScoringContext(candidates, params.hostAcceptDamping);
 
   const scored = candidates.map((candidate) => {
     const features = computeFeatures(viewer, candidate, state, now, context);

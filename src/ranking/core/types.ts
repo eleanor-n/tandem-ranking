@@ -341,6 +341,13 @@ export interface ResolvedParams {
    * reason: a global term should be an advantage, not a monopoly.
    */
   repeatableContextDamping: number;
+  /**
+   * rho — the damping exponent on the rank-normalised host term inside
+   * P_accept (v1.8 §1.2). 0 flattens the host term entirely, 1 is the raw rank.
+   * Resolved rather than constant so §3.3 can sweep it, which is the
+   * measurement that decides whether §1.2 is the right repair.
+   */
+  hostAcceptDamping: number;
   /** Rate in exhaustion = 1 - exp(-rate * completedTogether) (§3). */
   exhaustionRate: number;
   /** beta in salience = interest x (1 + beta * novelty) (§1.4). */

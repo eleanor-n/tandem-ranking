@@ -354,13 +354,14 @@ export function acceptLikelihood(
   viewer: Viewer,
   candidate: Candidate,
   hostRank?: number,
+  damping: number = CONSTANTS.features.acceptance.hostAcceptDamping,
 ): Unit {
   if (candidate.autoAcceptTrusted && viewer.trustedByHostIds.includes(candidate.hostId)) {
     return 1;
   }
 
   const rank = hostRank ?? hostReliability(candidate);
-  const damped = Math.pow(clamp01(rank), CONSTANTS.features.acceptance.hostAcceptDamping);
+  const damped = Math.pow(clamp01(rank), damping);
   const pickiness = 1 - clamp01(rank);
 
   return clamp01(damped * (1 + pickiness * viewerDeviation(viewer, candidate)));
@@ -466,6 +467,8 @@ export interface ScoringContext {
   hostReliabilityRank: ReadonlyMap<string, number>;
   /** category -> rank-normalised repeatableContext in (0, 1]. Ties share a rank. */
   repeatableContextRank: ReadonlyMap<string, number>;
+  /** rho. Passed through rather than read from CONSTANTS so §3.3 can sweep it. */
+  hostAcceptDamping: number;
 }
 
 /**
@@ -501,7 +504,10 @@ export function rankNormalise(values: ReadonlyMap<string, number>): Map<string, 
 }
 
 /** Build the context for one pool. */
-export function buildScoringContext(candidates: readonly Candidate[]): ScoringContext {
+export function buildScoringContext(
+  candidates: readonly Candidate[],
+  hostAcceptDamping: number = CONSTANTS.features.acceptance.hostAcceptDamping,
+): ScoringContext {
   const hostValues = new Map<string, number>();
   const categoryValues = new Map<string, number>();
 
@@ -517,6 +523,7 @@ export function buildScoringContext(candidates: readonly Candidate[]): ScoringCo
   return {
     hostReliabilityRank: rankNormalise(hostValues),
     repeatableContextRank: rankNormalise(categoryValues),
+    hostAcceptDamping,
   };
 }
 
@@ -545,7 +552,9 @@ export function computeFeatures(
     timeFit: timeFit(viewer, candidate),
     socialContext: socialContext(viewer, candidate),
     hostReliability: hostReliability(candidate),
-    acceptLikelihood: acceptLikelihood(viewer, candidate, hostRank),
+    acceptLikelihood: acceptLikelihood(
+      viewer, candidate, hostRank, context?.hostAcceptDamping,
+    ),
     completionPrior: completionPrior(candidate, now),
     repeatableContext: raw,
     repeatableContextRank: context?.repeatableContextRank.get(candidate.category) ?? raw,

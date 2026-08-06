@@ -68,22 +68,39 @@ import type { Candidate, ResolvedParams } from '../src/ranking/core/types.js';
 
 type Arm =
   | 'shipped'
-  | 'regime_adaptive'
-  | 'full_ranker_fixed'
+  | 'ranker_repaired'
+  | 'ranker_no_funnel'
   | 'proximity_only'
   | 'random';
 
 const ARMS: Arm[] = [
-  'shipped', 'regime_adaptive', 'full_ranker_fixed', 'proximity_only', 'random',
+  'shipped', 'ranker_repaired', 'ranker_no_funnel', 'proximity_only', 'random',
 ];
 
 const ARM_NOTES: Record<Arm, string> = {
-  shipped: 'v1.7 as it ships — proximity x demand x session penalties, ranker shelved',
-  regime_adaptive: 'the SHELVED ranker, density-continuous parameters (v1.6)',
-  full_ranker_fixed: 'v1.5 constants, regime pinned to 1 (no adaptation)',
+  shipped: 'v1.8 as it ships — proximity x demand x session penalties, ranker shelved',
+  ranker_repaired: 'the SHELVED ranker with the v1.8 funnel repair (§1.2-1.4)',
+  ranker_no_funnel: 'the D3 ablation: funnelExponent 0, funnel factors removed entirely',
   proximity_only: 'nearest first, taste-blind — the v1.5 giant-killer',
   random: 'the floor. If anything loses to this it is a bug, not a design failure',
 };
+
+/**
+ * WHY `regime_adaptive` AND `full_ranker_fixed` ARE GONE.
+ *
+ * v1.8 §2 collapsed the density pairs, so `resolveParams` ignores the regime and
+ * those two arms became the same configuration as each other. Keeping both would
+ * have reported one number twice and implied a comparison that no longer exists.
+ *
+ * WHAT CANNOT BE MEASURED HERE, stated rather than glossed: the PRE-REPAIR
+ * funnel is not reachable through `paramsOverride`. §1.3 removed P_complete from
+ * the product structurally and §1.2 rewrote P_accept's shape, so no parameter
+ * setting reconstructs v1.7's arithmetic. The comparison against it is made
+ * against the numbers recorded in DIAGNOSTICS.md §D3, which came from the same
+ * frozen population model, the same seeds, and (at regime 1) the same
+ * parameter values the collapse now uses — so they are directly comparable.
+ * That is a claim worth stating explicitly because it is doing real work.
+ */
 
 /**
  * Every arm except `shipped` has to WAKE THE RANKER UP.
@@ -101,6 +118,9 @@ function armParams(arm: Arm, regime: number, opts: Options): Partial<ResolvedPar
     ...(opts.exhaustionOn ? { exhaustionRate: reactivatedExhaustion(regime) } : {}),
     ...(opts.funnelExponent !== null ? { funnelExponent: opts.funnelExponent } : {}),
     ...(opts.demandWeight !== null ? { demandWeight: opts.demandWeight } : {}),
+    ...(opts.rho !== null ? { hostAcceptDamping: opts.rho } : {}),
+    ...(opts.repeatableContextWeight !== null
+      ? { repeatableContextWeight: opts.repeatableContextWeight } : {}),
   };
 
   if (arm === 'shipped') {
@@ -108,9 +128,11 @@ function armParams(arm: Arm, regime: number, opts: Options): Partial<ResolvedPar
     return tweaks;
   }
 
-  const base = resolveParams(arm === 'full_ranker_fixed' ? 1 : regime);
+  const base = resolveParams(regime);
   return {
     ...base,
+    // The D3 ablation arm: funnel factors raised to the identity.
+    ...(arm === 'ranker_no_funnel' ? { funnelExponent: 0 } : {}),
     ...tweaks,
     ...(opts.proximityWeight !== null
       ? { pJoin: pJoinWithProximity(base, opts.proximityWeight) }
@@ -170,6 +192,10 @@ interface Options {
    */
   funnelExponent: number | null;
   demandWeight: number | null;
+  /** §3.3. rho — the host-term damping exponent inside P_accept. */
+  rho: number | null;
+  /** §3.4. 0 drops the dampened repeatable-context term entirely. */
+  repeatableContextWeight: number | null;
   /** Restrict to a subset of arms. An ablation rarely needs all five. */
   arms: Arm[];
 }
@@ -199,6 +225,9 @@ function parseArgs(): Options {
       ? null : Number(flag('--funnel-exponent')),
     demandWeight: flag('--demand-weight') === null
       ? null : Number(flag('--demand-weight')),
+    rho: flag('--rho') === null ? null : Number(flag('--rho')),
+    repeatableContextWeight: flag('--repeatable-context') === null
+      ? null : Number(flag('--repeatable-context')),
     arms: (() => {
       const raw = flag('--arms');
       if (!raw) return ARMS;
@@ -397,7 +426,7 @@ function regimeFor(world: World, userId: string, poolSize: number): number {
   return reading.regime;
 }
 
-const RANKED_ARMS = new Set<Arm>(['shipped', 'regime_adaptive', 'full_ranker_fixed']);
+const RANKED_ARMS = new Set<Arm>(['shipped', 'ranker_repaired', 'ranker_no_funnel']);
 
 function runOne(arm: Arm, users: number, seed: number, opts: Options): Result {
   const rng = seededRng(`${arm}:${users}`, seed);
@@ -465,9 +494,10 @@ function runOne(arm: Arm, users: number, seed: number, opts: Options): Result {
       let deck: Candidate[];
 
       if (RANKED_ARMS.has(arm)) {
-        const regime = arm === 'full_ranker_fixed'
-          ? 1
-          : regimeFor(world, person.id, pool.length);
+        // Still driven through the real coverage pipeline so the reported
+        // coverage/regime columns remain meaningful, even though §2 collapsed
+        // the pairs and nothing downstream reads the scalar any more.
+        const regime = regimeFor(world, person.id, pool.length);
 
         if (arm === 'shipped') {
           regimeSamples.push(regime);
@@ -715,7 +745,7 @@ async function proximitySweep(opts: Options): Promise<void> {
   console.log('§4.4 expanded proximity sweep');
   console.log(`  w_proximity ${weights[0]} .. ${weights[weights.length - 1]} step 0.05`);
   console.log(`  sizes ${sizes.join(', ')}, seeds ${opts.seeds.join(', ')}, ${opts.days} days`);
-  console.log('  arm: regime_adaptive (the shelved ranker, woken via paramsOverride)');
+  console.log('  arm: ranker_repaired (the shelved ranker, woken via paramsOverride)');
   console.log('');
 
   const table: string[] = [];
@@ -729,7 +759,7 @@ async function proximitySweep(opts: Options): Promise<void> {
     const repeatCells: string[] = [];
     for (const users of sizes) {
       const runs = opts.seeds.map((seed) =>
-        runOne('regime_adaptive', users, seed, { ...opts, proximityWeight: w }));
+        runOne('ranker_repaired', users, seed, { ...opts, proximityWeight: w }));
       const agg = aggregate(runs);
       grid.set(`${w}|${users}`, agg);
       cells.push(n3(agg.retentionAfterEmpty));
@@ -842,7 +872,7 @@ async function main(): Promise<void> {
   for (const users of opts.sizes) {
     const random = aggregates.find((x) => x.users === users && x.arm === 'random');
     if (!random) continue;
-    for (const arm of ['shipped', 'regime_adaptive', 'full_ranker_fixed'] as Arm[]) {
+    for (const arm of ['shipped', 'ranker_repaired', 'ranker_no_funnel'] as Arm[]) {
       const row = aggregates.find((x) => x.users === users && x.arm === arm);
       if (row && row.hostRetention < random.hostRetention) {
         console.log(

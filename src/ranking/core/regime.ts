@@ -238,6 +238,7 @@ export function resolveParams(regime: number): ResolvedParams {
     completionFloor: CONSTANTS.score.completionFloor,
     repeatableContextWeight: CONSTANTS.score.rRepeat.repeatableContext,
     repeatableContextDamping: CONSTANTS.score.repeatableContextDamping,
+    hostAcceptDamping: CONSTANTS.features.acceptance.hostAcceptDamping,
   };
 }
 
