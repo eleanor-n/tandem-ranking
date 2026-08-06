@@ -558,16 +558,58 @@ argument is "less of a bad thing" rather than "not a bad thing".
 
 ## E5 — The two dropped ablations (§3.1)
 
-v1.7 abandoned two ablations for time. The reason mattered: the harness scan was
-quadratic in run length, an arm that completes more tandems creates more posts
-through supply response, so **the best-performing configurations were the
-slowest to measure** — a harness whose cost correlates with the result selects
-which results get collected.
+v1.7 abandoned two ablations for time. The reason mattered and was stated at the
+time: the harness scan was quadratic in run length, an arm that completes more
+tandems creates more posts through supply response, so **the best-performing
+configurations were the slowest to measure** — a harness whose cost correlates
+with the result selects which results get collected.
 
-Re-run on the fixed harness at N=600, six seeds. **It did not turn out to
-matter**: neither abandoned ablation changes a conclusion. Both are recorded
-because "we checked and it was fine" is worth exactly as much as the original
-worry.
+**The worry was justified. One of the two dropped ablations is the best
+configuration measured anywhere in this build.**
+
+N=600, six seeds, `ranker_repaired` with the stated overrides:
+
+| configuration | retention | repeat | tandems/u | zero-joiner | hosts alive | Gini | relevance |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `ranker_repaired` baseline | 0.838 | 0.440 | 15.96 | 33.5% | 15.9% | 0.842 | 0.114 |
+| **C: demand ×5 + funnel off** | **0.970** | 0.316 | 14.60 | **3.2%** | **72.9%** | **0.364** | 0.135 |
+| `shipped`, for comparison | 0.957 | 0.515 | 17.81 | 9.4% | 59.5% | 0.409 | 0.161 |
+
+Ablation C beats every arm in E1 on retention, zero-joiner rate, surviving hosts
+and Gini — 3.2% of posts got nobody, against `shipped`'s 9.4% and
+`proximity_only`'s 20.2%.
+
+### The finding, which contradicts v1.7 §D3
+
+v1.7 measured demand balancing at 5× and concluded it "cannot absorb this": it
+closed about a third of the gap to `random` and still lost. **That measurement
+was taken with the funnel intact.** Repeated with the funnel off, the same 5×
+demand weight produces the best liquidity numbers in the entire build.
+
+So the two interact, and the direction is worth stating plainly:
+
+> Demand balancing is nearly useless while a global-consensus term is fighting
+> it, and highly effective once that term is removed.
+
+Which makes sense mechanically. Demand balancing is a `global_allocation` term
+trying to spread attention; `hostRank^ρ` is a `global_quality` term concentrating
+it. They are the same kind of object pointed in opposite directions, and the
+concentrating one was winning. v1.7's "demand balancing cannot fix this" was
+true and is not the same claim as "demand balancing does not work".
+
+It costs repeat rate (0.316 against `shipped`'s 0.515) and some deck relevance
+(0.135 vs 0.161), which is the trade this configuration is making — fewer,
+better-spread joins.
+
+### A note on how this was almost missed twice
+
+I pre-wrote the conclusion of this section as "it did not turn out to matter"
+before the numbers landed, and had to correct it. That is the same failure mode
+as §D4's three-seed verdict: a comfortable conclusion, written down before the
+evidence, that happened to validate the existing decision. Recorded because the
+correction is more informative than the result.
+
+**Not acted on.** `demandWeight` remains 0.10.
 
 ---
 
