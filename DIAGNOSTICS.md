@@ -752,3 +752,67 @@ under an abort. The un-clipped form is FUNNEL.md §8 item 0 and is **UNMEASURED*
 The classification is directionally vindicated — the *main effect* was the
 harmful part — but this is weaker evidence for the taxonomy than §E3 made it
 look.
+
+---
+
+## F2 — Two shell mistakes that silently changed an experiment
+
+Recorded in full because neither was catchable by the type system, the tests, or
+reading the command back, and because the safeguard that caught one of them was
+added earlier in this same pass and fired on its first real run.
+
+**The provenance printout.** `sweep.ts` now prints, on every run:
+
+```
+  effective funnel config:
+    rho                      0.5 (pinned)
+    repeatableContextWeight  0.25 (pinned)
+    demandWeight             0.1 (from constants)
+    funnelExponent           1 (from constants)
+```
+
+It was added after noticing that a long sweep had been launched *before* the
+§1.5 abort edited `constants.ts`, so the ablation invocations — which start an
+hour into the run — would have inherited different values from the main arms,
+producing a comparison table across two configurations with nothing in the
+output saying so. That run was killed and relaunched.
+
+**Mistake 1: zsh does not word-split unquoted expansions.**
+
+```zsh
+V18="--rho 0.5 --repeatable-context 0.25"
+npm run sweep -- --sizes 600 --seeds $S $V18 --csv ...
+```
+
+In bash this expands to four arguments. In zsh it is **one**, and every flag
+inside it is silently ignored. The relaunched 25-seed run therefore did not pin
+anything — it ran at whatever `constants.ts` said, which by then was ρ=0, the
+*post*-abort configuration.
+
+The printout said `0 (from constants)` where the command clearly asked for 0.5.
+Without it, the post-abort numbers would have been written up as the pre-abort
+table, and the write-up would have been internally consistent: `ranker_repaired`
+at 0.938 with a Gini of 0.464 is a perfectly plausible-looking row. It is simply
+a different experiment.
+
+`parseArgs` now throws on any `--flag` containing a space, and the error names
+the zsh behaviour rather than just rejecting the input.
+
+**Mistake 2: `seq -s, 1 24` emits a trailing comma.**
+
+`Number('')` is `0`, not `NaN`, so `.filter(Number.isFinite)` passed the empty
+field through and the run used **25** seeds including a seed 0. Harmless to the
+result — seed 0 is a valid seed — but it means two tables that both said "24
+seeds" were computed over different seed sets. `nums()` now throws.
+
+**The general lesson, which is the reason this is in a diagnostics file at all:**
+every one of the errors in §F0 and §F2 is an instance of the same thing — an
+experiment quietly becoming a different experiment while its label stays the
+same. A gate pointed at the wrong metric, a CSV rounded below the precision of
+the comparison, a flag that never parsed, a seed list one element longer than it
+claimed. None produce an error. All produce a number that looks fine.
+
+The countermeasure is not more care. It is making the artifact state what it
+actually did: error bars on the metric being ranked, the effective configuration
+in the run header, and a parser that refuses input it cannot faithfully
+represent.
