@@ -206,8 +206,39 @@ function parseArgs(): Options {
     const i = argv.indexOf(name);
     return i >= 0 && argv[i + 1] ? (argv[i + 1] as string) : null;
   };
-  const nums = (raw: string | null, fallback: number[]): number[] =>
-    raw ? raw.split(',').map((x) => Number(x.trim())).filter(Number.isFinite) : fallback;
+  // `Number('')` is 0, not NaN, so `.filter(Number.isFinite)` lets an empty
+  // field through as a silent zero. `seq -s, 1 24` emits a trailing comma; that
+  // turned a 24-seed run into a 25-seed run with an extra seed 0 and said
+  // nothing. Throw instead — a malformed list is a typo, and continuing with a
+  // quietly different experiment is the worst available response to a typo.
+  const nums = (raw: string | null, fallback: number[]): number[] => {
+    if (raw === null) return fallback;
+    return raw.split(',').map((x) => {
+      const t = x.trim();
+      const n = Number(t);
+      if (t === '' || !Number.isFinite(n)) {
+        throw new Error(`bad numeric list ${JSON.stringify(raw)}: field ${JSON.stringify(x)}`);
+      }
+      return n;
+    });
+  };
+
+  // A flag whose value is itself a flag means the value was swallowed — almost
+  // always an unquoted shell variable that did not word-split. zsh does not
+  // split unquoted expansions, so `$OPTS` arrives as ONE argv entry and every
+  // flag inside it is silently ignored. That is how a 25-seed run intended to
+  // pin rho=0.5 ran at whatever constants.ts happened to say.
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] as string;
+    if (a.startsWith('--') && a.includes(' ')) {
+      throw new Error(
+        `argument ${JSON.stringify(a)} contains a space — it was passed as one ` +
+        'argument instead of several. In zsh, unquoted "$VAR" does not ' +
+        'word-split; use an array (opts=(--rho 0.5); cmd "${opts[@]}") or write ' +
+        'the flags out inline.',
+      );
+    }
+  }
 
   const weight = flag('--proximity-weight');
 
