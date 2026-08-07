@@ -878,3 +878,79 @@ interim report from this pass stated at six seeds that the claim was unsupported
 that was right about the evidence available then and is superseded now. The
 honest summary is that v1.8 reached a true conclusion by a method that could not
 have distinguished it from a false one.
+
+---
+
+## F4 — Did the abort work? Matched seeds, pre versus post
+
+The §1.5 abort set ρ to 0 and `repeatableContextWeight` to 0. §F3 is the
+configuration before it. This is the same seeds, same population, same
+everything, after it.
+
+**The control first.** Five of the seven arms do not have ρ anywhere in their
+path — `shipped` is shelved, `ranker_no_funnel` and ablation C have
+`funnelExponent 0`, and `proximity_only` and `random` are not ranked at all.
+All five are **byte-identical** across the two runs, on all five metrics. Only
+the two arms that should have moved, moved. That is what makes the rest of this
+section a measurement rather than a comparison of two runs.
+
+| arm | retention | Gini | zero-joiner | hosts alive | relevance |
+|---|---|---|---|---|---|
+| ablation C | 0.972 = | 0.365 = | 3.1% = | 72.8% = | 0.136 = |
+| shipped | 0.959 = | 0.414 = | 9.0% = | 58.9% = | 0.161 = |
+| ranker_no_funnel | 0.947 = | 0.427 = | 9.7% = | 58.9% = | 0.143 = |
+| **ablation D** | 0.882 → **0.944** | 0.725 → **0.448** | 22.2% → **11.5%** | 29.3% → **55.3%** | 0.127 → **0.135** |
+| **ranker_repaired** | 0.843 → **0.939** | 0.840 → **0.464** | 33.3% → **12.9%** | 16.6% → **52.8%** | 0.114 → **0.128** |
+| proximity_only | 0.933 = | 0.538 = | 19.8% = | 40.8% = | 0.173 = |
+| random | 0.860 = | 0.644 = | 42.9% = | 22.4% = | 0.056 = |
+
+For `ranker_repaired`, paired across the same seeds:
+
+| | gap | 2 SE bar | |
+|---|---:|---:|---|
+| retention | 0.096 | 0.0077 | **12.4× SEPARATES** |
+| Gini | 0.376 | 0.0040 | **92.9× SEPARATES** |
+
+**Every metric improved, including deck relevance** (0.114 → 0.128). That is the
+same signature as v1.7 §D3 and it is the part worth insisting on: removing the
+viewer-independent term is not a fairness-for-relevance trade. The deck got
+*more* relevant when the global consensus factor came out of it, because a
+factor that is identical for every viewer cannot be carrying per-viewer signal —
+it can only be displacing it.
+
+### Where the arm now sits
+
+| comparison | retention | Gini |
+|---|---|---|
+| vs `random` | 0.939 vs 0.860, **11.9× SEPARATES** | 0.464 vs 0.644, **29.8× SEPARATES** |
+| vs `proximity_only` | 0.939 vs 0.933, **0.92× TIE** | 0.464 vs 0.538, **13.7× SEPARATES** |
+
+So the repaired-and-aborted ranker:
+
+* **clears the `random` floor decisively**, which it did not do before (§F3);
+* **clears the pre-registered 0.75 Gini ceiling** at 0.464, which was the whole
+  point of the abort;
+* is **statistically indistinguishable from `proximity_only` on host
+  retention** — a 4-way tie with `ranker_no_funnel` and ablation D — while
+  beating it on Gini by 13.7×.
+
+That last line is the honest summary of what the ranker currently earns. Against
+the taste-blind baseline it buys **no measurable retention** and a **materially
+better distribution**. Whether a fairness gain with no retention gain justifies
+the complexity is a product decision and not one this file can make — but it is
+a much narrower claim than "the ranker works", and it is the claim the data
+supports.
+
+### What this does not settle
+
+`ranker_repaired` at ρ=0 still contains the clipping defect of §F1: the upside
+of the pairwise interaction is clamped away, so this arm is "no host main
+effect, downside-only viewer interaction". It is entirely possible that an
+un-clipped form does better than both rows above. That remains **UNMEASURED**
+and is FUNNEL.md §8 item 0.
+
+Ablation C remains the best configuration in the build at 0.972 / 0.365, and it
+does not depend on ρ at all — its funnel is off. Its margin over `shipped` is
+3.11× on retention and 9.34× on Gini. The reason it is still not being adopted
+has nothing to do with separation and everything to do with `churnPerEmptyPost`;
+see FUNNEL.md §7.
