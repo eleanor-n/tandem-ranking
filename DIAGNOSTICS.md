@@ -816,3 +816,65 @@ The countermeasure is not more care. It is making the artifact state what it
 actually did: error bars on the metric being ranked, the effective configuration
 in the run header, and a parser that refuses input it cannot faithfully
 represent.
+
+---
+
+## F3 — The v1.8 comparison table, with the error bars it should have had
+
+N=600, **24 seeds**, ρ=0.5 and `repeatableContextWeight`=0.25 pinned on the
+command line so the table reproduces the v1.8 configuration regardless of what
+`constants.ts` now says. This is the table §E1 reported without error bars.
+
+| rank | arm | host retention | verdict vs next |
+|---:|---|---:|---|
+| 1 | ablation C (demand ×5, funnel off) | **0.972 ±0.001** | 3.11× SEPARATES |
+| 2 | shipped | 0.959 ±0.002 | 2.12× SEPARATES |
+| 3 | ranker_no_funnel | 0.947 ±0.002 | 2.16× SEPARATES |
+| 4 | proximity_only | 0.933 ±0.002 | 7.08× SEPARATES |
+| 5 | ablation D (half funnel) | 0.882 ±0.003 | 2.79× SEPARATES |
+| 6 | random | 0.860 ±0.003 | 1.97× SEPARATES |
+| 7 | ranker_repaired | 0.843 ±0.003 | — |
+
+**Every adjacent pair separates.** The ordering is fully identified, and
+ablation C's win is real rather than a draw dressed as a ranking.
+
+Host Gini separates at every pair too, by much larger margins — 2.07× at the
+narrowest, 26.91× at the widest:
+
+| arm | host Gini |
+|---|---:|
+| ablation C | **0.365 ±0.002** |
+| shipped | 0.414 ±0.002 |
+| ranker_no_funnel | 0.427 ±0.002 |
+| proximity_only | 0.538 ±0.002 |
+| random | 0.644 ±0.002 |
+| ablation D | 0.725 ±0.002 |
+| ranker_repaired | **0.840 ±0.001** |
+
+**Gini is the metric that discriminates in this simulator; host retention is
+not.** That is not a new discovery — `sweep.ts` has said so in a comment since
+v1.7 ("plain host retention saturates … every arm scores 0.8–0.9 and the metric
+separates nothing") — but it is worth restating next to a table where the
+retention margins are 2× the noise and the Gini margins are 9× to 27×. The
+primary metric is the one that barely resolves.
+
+### The pair that changed its verdict between 6 seeds and 24
+
+This is the whole reason the pass was run, so it gets its own row:
+
+| | random | ranker_repaired | gap | 2 SE bar | verdict |
+|---|---:|---:|---:|---:|---|
+| 6 seeds | 0.860 ±0.004 | 0.838 ±0.010 | 0.0217 | 0.0221 | **TIE** (0.98×) |
+| 24 seeds | 0.860 ±0.003 | 0.843 ±0.003 | 0.0166 | 0.0084 | **SEPARATES** (1.97×) |
+
+Note the shape of it: the *gap* got smaller — 0.0217 to 0.0166 — and the pair
+separated anyway, because the *bar* fell faster. At six seeds
+`ranker_repaired`'s own SE was ±0.010, three times its 24-seed value, and it
+alone accounted for most of the bar.
+
+So the v1.8 claim that the repaired ranker loses to `random` is **correct**, and
+was **not demonstrated** by the evidence offered for it. Both halves matter. An
+interim report from this pass stated at six seeds that the claim was unsupported;
+that was right about the evidence available then and is superseded now. The
+honest summary is that v1.8 reached a true conclusion by a method that could not
+have distinguished it from a false one.
