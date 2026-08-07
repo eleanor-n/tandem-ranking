@@ -31,6 +31,7 @@
 
 import { CONSTANTS } from './constants.js';
 import type {
+  CheckInSkip,
   Epoch,
   GivenFeedback,
   PendingCheckIn,
@@ -60,28 +61,57 @@ export function askableFrom(tandem: TandemRecord): Epoch {
 /**
  * What this user owes, in the order to ask it.
  *
- * Oldest first: a check-in decays in usefulness — someone asked about last
- * Tuesday gives a better answer than someone asked about six weeks ago — and
- * asking the stalest one first is what stops a backlog quietly becoming
- * permanent.
+ * MOST RECENT FIRST (v1.9 §3).
  *
- * Filtered on three things and nothing else:
+ * This reverses v1.7, which asked oldest-first on the reasoning that a backlog
+ * left alone quietly becomes permanent. That reasoning was about the QUEUE. The
+ * v1.9 ordering is about the ANSWER: a check-in decays in usefulness, and
+ * someone asked about last Tuesday gives a better answer than someone asked
+ * about six weeks ago. Given `maxPromptsPerAppOpen = 1`, only one of the two
+ * properties is available, and answer quality is the one worth having — a stale
+ * check-in answered from a vague memory is a row of noise in the single most
+ * predictive signal the system has.
+ *
+ * The cost is real and worth stating: with skips now remembered, a very old
+ * unanswered check-in may never be asked. That is an acceptable loss, because
+ * it is a check-in whose answer would have been guessed anyway.
+ *
+ * Filtered on four things and nothing else:
  *   1. the tandem completed (`tandems.status`, not `activities.status`)
  *   2. it ended at least `minElapsedHours` ago
  *   3. this rater has not already answered for this counterpart
+ *   4. this rater has not skipped it (v1.9 §3)
  *
- * A SKIP LEAVES NO ROW, so a skipped check-in reappears here next time. That is
- * deliberate and it is the reason skip is not stored as a negative: a person
- * who did not answer is not a person who said no, and conflating the two
- * teaches people that answering honestly has consequences.
+ * ---------------------------------------------------------------------------
+ * ON SKIPS — what changed and what did not
+ *
+ * v1.7 stored nothing for a skip, so a skipped prompt returned next session.
+ * v1.9 §3 specifies that a skip is remembered and not re-asked. Both are
+ * defensible; the argument for remembering is that re-asking a question someone
+ * actively dismissed reads as the app not listening.
+ *
+ * What has NOT changed, and must not: **a skip is not a negative.** It writes
+ * no `interest_events` row, carries no polarity, and lives in its own table
+ * with no `rated_id` (see the v1.9 migration header). A person who did not
+ * answer is not a person who said no, and conflating the two teaches people
+ * that answering honestly has consequences — which costs the signal
+ * permanently, not just for that row.
  */
 export function pendingCheckIns(
   userId: UserId,
   tandems: readonly TandemRecord[],
   given: readonly GivenFeedback[],
   now: Epoch,
+  skipped: readonly CheckInSkip[] = [],
 ): PendingCheckIn[] {
   const answered = new Set(given.map((g) => `${g.tandemId}|${g.ratedId}`));
+  // Filtered by rater, not trusted to arrive pre-filtered. Both directions of a
+  // tandem share a `tandemId`, so skipping on the rater alone would let one
+  // person's dismissal suppress their counterpart's prompt — silently, and in
+  // the direction that loses an answer.
+  const skippedIds = new Set(
+    skipped.filter((s) => s.raterId === userId).map((s) => s.tandemId),
+  );
 
   const out: PendingCheckIn[] = [];
 
@@ -98,6 +128,7 @@ export function pendingCheckIns(
 
     if (askableFrom(tandem) > now) continue;
     if (answered.has(`${tandem.tandemId}|${ratedId}`)) continue;
+    if (skippedIds.has(tandem.tandemId)) continue;
 
     const endedAt = tandem.endedAt
       ?? tandem.createdAt + CONSTANTS.checkin.assumedDurationHours * MS_PER_HOUR;
@@ -112,7 +143,10 @@ export function pendingCheckIns(
     });
   }
 
-  return out.sort((a, b) => a.endedAt - b.endedAt || a.tandemId.localeCompare(b.tandemId));
+  // Most recent first. Tie broken on id so the order is total and stable —
+  // two tandems that ended in the same millisecond must not swap between calls,
+  // or `maxPromptsPerAppOpen = 1` would surface a different one each open.
+  return out.sort((a, b) => b.endedAt - a.endedAt || a.tandemId.localeCompare(b.tandemId));
 }
 
 /**

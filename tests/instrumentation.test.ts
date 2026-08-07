@@ -14,6 +14,7 @@ import type {
 } from '../src/ranking/adapter/instrumentation.js';
 import { rank } from '../src/ranking/core/rank.js';
 import { CONSTANTS } from '../src/ranking/core/constants.js';
+import { SNAPSHOT_VERSION } from '../src/ranking/core/snapshot.js';
 import type { RankingEventWrite } from '../src/ranking/core/types.js';
 import { T0, makeViewer, standardPool } from './fixtures/index.js';
 
@@ -172,19 +173,19 @@ describe('the snapshot carries the whole feature set', () => {
       'hostReliability', 'acceptLikelihood', 'completionPrior',
       'repeatableContext', 'rhythmOverlap', 'freshness', 'graphAffinity',
     ] as const) {
-      expect(typeof snapshot.features[feature], feature).toBe('number');
+      expect(typeof snapshot.computed.features[feature], feature).toBe('number');
     }
 
     // And the funnel factors, which the ship gate raises to the identity but
     // which are still computed so "would the funnel have done better?" stays
     // answerable offline rather than needing another three months of data.
     for (const factor of ['pJoin', 'pAccept', 'pComplete', 'rRepeat'] as const) {
-      expect(typeof snapshot.funnel[factor], factor).toBe('number');
+      expect(typeof snapshot.computed.funnel[factor], factor).toBe('number');
     }
 
-    expect(snapshot.v).toBe(CONSTANTS.instrumentation.snapshotVersion);
-    expect(snapshot.algo).toBe(CONSTANTS.instrumentation.algoVersion);
-    expect(snapshot.rankerEnabled).toBe(false);
+    expect(snapshot.v).toBe(SNAPSHOT_VERSION);
+    expect(snapshot.computed.algo).toBe(CONSTANTS.instrumentation.algoVersion);
+    expect(snapshot.computed.rankerEnabled).toBe(false);
   });
 
   it('a degraded deck logs a null snapshot rather than a fabricated one', async () => {

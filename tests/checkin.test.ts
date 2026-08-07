@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import { askableFrom, checkInsToPrompt, pendingCheckIns } from '../src/ranking/core/checkin.js';
 import { CONSTANTS } from '../src/ranking/core/constants.js';
-import type { GivenFeedback, TandemRecord } from '../src/ranking/core/types.js';
+import type { CheckInSkip, GivenFeedback, TandemRecord } from '../src/ranking/core/types.js';
 
 const HOUR = 3_600_000;
 const T0 = Date.UTC(2026, 6, 1, 12, 0, 0);
@@ -110,24 +110,56 @@ describe('asked once, and only once', () => {
     expect(pendingCheckIns('u_them', [tandem()], given, T0)).toHaveLength(1);
   });
 
-  it('a SKIP writes nothing, so it comes back next time', () => {
-    // The whole design of skip: a person who did not answer is not a person who
-    // said no. Storing a skip as a negative teaches people that answering
-    // honestly has consequences, and then the signal is worthless.
-    const afterSkip: GivenFeedback[] = [];
-    expect(pendingCheckIns('u_me', [tandem()], afterSkip, T0)).toHaveLength(1);
+  it('a SKIP is remembered and not asked again (v1.9 §3)', () => {
+    // CHANGED in v1.9. v1.7 stored nothing for a skip, so it returned next
+    // session; §3 specifies that a dismissed prompt stays dismissed, on the
+    // argument that re-asking something someone actively waved away reads as
+    // the app not listening.
+    expect(pendingCheckIns('u_me', [tandem()], [], T0, [])).toHaveLength(1);
+    expect(pendingCheckIns('u_me', [tandem()], [], T0, [{ tandemId: 't1', raterId: 'u_me' }])).toEqual([]);
+  });
+
+  it('a skip is NOT a negative — it produces no feedback and no polarity', () => {
+    // The part that did not change, and must not. The type itself is the
+    // guarantee: `CheckInSkip` has one field, `tandemId`. There is no `ratedId`
+    // and no polarity to misread, so a skip cannot become a rating by anyone
+    // later reading the wrong column.
+    const skip: CheckInSkip = { tandemId: 't1', raterId: 'u_me' };
+    expect(Object.keys(skip).sort()).toEqual(['raterId', 'tandemId']);
+    expect(skip).not.toHaveProperty('ratedId');
+
+    // And a skipped tandem leaves the OTHER direction untouched: u_me skipping
+    // says nothing about what u_them owes.
+    expect(pendingCheckIns('u_them', [tandem()], [], T0, [{ tandemId: 't1', raterId: 'u_me' }]))
+      .toHaveLength(1);
   });
 });
 
 describe('order and volume', () => {
-  it('asks oldest first — a check-in decays in usefulness', () => {
+  it('asks MOST RECENT first — a check-in decays in usefulness', () => {
+    // REVERSED in v1.9 §3. v1.7 asked oldest-first to stop a backlog becoming
+    // permanent; that is a property of the QUEUE. Most-recent-first is a
+    // property of the ANSWER, and with maxPromptsPerAppOpen = 1 only one of the
+    // two is available. A six-week-old check-in answered from a vague memory is
+    // a row of noise in the highest-weighted signal the system has.
     const tandems = [
       tandem({ tandemId: 'recent', endedAt: T0 - 3 * HOUR }),
       tandem({ tandemId: 'ancient', endedAt: T0 - 800 * HOUR }),
       tandem({ tandemId: 'middle', endedAt: T0 - 100 * HOUR }),
     ];
     expect(pendingCheckIns('u_me', tandems, [], T0).map((p) => p.tandemId))
-      .toEqual(['ancient', 'middle', 'recent']);
+      .toEqual(['recent', 'middle', 'ancient']);
+  });
+
+  it('the freshest check-in is the one that actually gets asked', () => {
+    // The consequence of the ordering, stated separately because it is what
+    // matters: the user only ever sees slice(0, 1) of the above.
+    const tandems = [
+      tandem({ tandemId: 'ancient', endedAt: T0 - 800 * HOUR }),
+      tandem({ tandemId: 'yesterday', endedAt: T0 - 26 * HOUR }),
+    ];
+    const prompted = checkInsToPrompt(pendingCheckIns('u_me', tandems, [], T0));
+    expect(prompted.map((p) => p.tandemId)).toEqual(['yesterday']);
   });
 
   it('surfaces one per app open, not the backlog', () => {

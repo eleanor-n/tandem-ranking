@@ -225,7 +225,7 @@ describe('the ship gate disables it', () => {
       { debug: true },
     );
     expect(result.debug!.params.completionFloor).toBe(0);
-    expect(result.snapshots[0]!.funnel.belowCompletionFloor).toBe(false);
+    expect(result.snapshots[0]!.computed.funnel.belowCompletionFloor).toBe(false);
   });
 });
 

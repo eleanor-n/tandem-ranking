@@ -23,13 +23,18 @@ reference adapter, a migration, a backfill script, and an offline simulator.
 
 ```bash
 npm install
-npm test          # 153 tests
+npm test          # 242 tests
 npm run typecheck
 npm run sim -- --users 40 --days 120 --seed 1 --verbose
 npm run sweep -- --sizes 20,40,80,150,300,600 --seeds 1,2,3
 npm run sweep -- --proximity-sweep        # the §4.4 weight sweep
 npm run graph:rebuild -- --dry-run        # recompute graph_edges from tandems
 ```
+
+**Integrating this into the app? Start with
+[`INTEGRATION.md`](INTEGRATION.md)** — install, the snapshot keys, the check-in
+contract, what to watch in the first month, and every known deferral. Nothing
+else in this repo is required reading for that.
 
 **Before applying anything to a real database, read
 [`SCHEMA.md`](SCHEMA.md)** and run the `PRECHECK` block at the top of
@@ -90,7 +95,7 @@ Implements steps **1, 2, 3, 5** of the v1.5 framework:
 | ✅ | The two **pre-registered aborts executed**: `hostAcceptDamping` 0.5 → 0 (§1.5 fired at Gini 0.842 ±0.002 vs a 0.75 threshold) and `repeatableContextWeight` 0.25 → 0 (§1.4 ran it both ways; nothing separated). Neither is tuning — both are the pre-committed response to a criterion agreed in advance |
 | ✅ | `PERF.md` §1/§2/§4 fixed, sequenced **before** logging is switched on: a candidate set selected by time rather than distance would have contaminated `ranking_events` at the source |
 | ✅ | The adapter has tests for the first time — 11 of them, asserting **queries** rather than results, which is the class of defect it is actually prone to |
-| ✅ | `supabase/analysis/churn-on-empty.sql` — measures `churnPerEmptyPost`, the one authored constant every demand-balancing conclusion is downstream of |
+| ✅ | `sql/churn_per_empty_post.sql` — measures `churnPerEmptyPost`, the one authored constant every demand-balancing conclusion is downstream of |
 | ⚠️ | **`P_accept` clips at ρ=0.** `clamp01(rank^ρ × (1 + pickiness × deviation))` pins at the ceiling when ρ=0, so the pairwise interaction survives only on the downside — it can penalise a poor record and cannot reward a good one. Left as measured, since the clipping was inside the arm that won. The un-clipped form is UNMEASURED and is the first thing to run. §F1 |
 | ⚠️ | **`demandWeight` is not being raised on the sim's recommendation.** Its optimum is close to a mechanical function of `churnPerEmptyPost = 0.18`, which was invented. The *direction* is robust; the *magnitude* is downstream of a guess. [`FUNNEL.md` §7](FUNNEL.md) |
 

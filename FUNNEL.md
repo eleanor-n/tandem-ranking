@@ -349,7 +349,7 @@ What *is* robust is the **direction**: demand balancing helped in every
 configuration tested, across funnel-on and funnel-off arms. That is a much
 weaker claim and it rests on much less.
 
-`supabase/analysis/churn-on-empty.sql` measures the constant. Until it returns
+`sql/churn_per_empty_post.sql` measures the constant. Until it returns
 something, `demandWeight` should move modestly if at all, and 0.5 is a
 hypothesis rather than a setting.
 
@@ -379,7 +379,7 @@ precisely so that these questions stop needing a simulator:
    rather than clipped — and re-run. If ρ = 0 still wins, the finding is clean.
    If it does not, the abort was right about the main effect and wrong about the
    magnitude, and that is worth knowing before any of this reaches a fit.
-1. **Measure `churnPerEmptyPost`.** `supabase/analysis/churn-on-empty.sql`. It
+1. **Measure `churnPerEmptyPost`.** `sql/churn_per_empty_post.sql`. It
    is the single load-bearing assumption behind every demand-balancing number
    here, it is currently invented, and it is measurable *today* on live data —
    noisily, but empirically. Read the Wilson interval, not the point estimate.

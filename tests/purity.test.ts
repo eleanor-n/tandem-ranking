@@ -36,7 +36,17 @@ describe('core is framework-agnostic', () => {
   it('imports nothing outside core/', () => {
     for (const file of coreFiles()) {
       const source = readFileSync(file, 'utf8');
-      const imports = [...source.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1] as string);
+      // Anchored to `import` at the start of a line, NOT a bare `from '...'`.
+      //
+      // The loose version matched prose inside ordinary string literals — a
+      // validator message reading `cannot tell "unavailable" from "predates the
+      // field"` parsed as an import of `" + "`. `code()` cannot be used here
+      // either, since blanking string literals also blanks the import specifier
+      // this test exists to read.
+      const imports = [...source.matchAll(/^import\b[\s\S]*?\bfrom\s+'([^']+)'/gm)]
+        .map((m) => m[1] as string);
+      expect(imports.length, `${file}: no imports parsed — check the regex`)
+        .toBeGreaterThanOrEqual(0);
       for (const spec of imports) {
         expect(
           spec.startsWith('./'),

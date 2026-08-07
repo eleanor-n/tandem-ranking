@@ -287,3 +287,99 @@ describe('failure is contained', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.9 §3 — the check-in write path
+// ---------------------------------------------------------------------------
+
+describe('check-in writes (v1.9 §3)', () => {
+  function port(opts: { skips?: unknown[] } = {}) {
+    const { client, recorded } = makeClient((table) => {
+      if (table === 'checkin_skips') return opts.skips ?? [];
+      return [];
+    });
+    return {
+      p: createSupabaseRankingPort(
+        client,
+        { distanceMiles: () => 1, newId: () => 'id', now: () => NOW },
+      ),
+      recorded,
+    };
+  }
+
+  it('an answer UPSERTS on (tandem_id, rater_id), so a double-tap is one row', () => {
+    // A double-tap and a retry-after-a-timeout-that-actually-succeeded both
+    // produce a second write no client-side guard prevents — and
+    // `tandem_feedback` row count is the beta's headline metric, so
+    // double-counting there overstates the one number anybody is watching.
+    const { p, recorded } = port();
+    return p.writeCheckIn({
+      tandemId: 't1', raterId: 'u1', ratedId: 'u2', positive: true, createdAt: NOW,
+    }).then(() => {
+      const rec = recorded.find((r) => r.table === 'tandem_feedback') as Recorded;
+      const upsert = rec.calls.find((c) => c.op === 'upsert');
+      expect(upsert, 'must upsert, not insert').toBeDefined();
+      expect(rec.calls.find((c) => c.op === 'insert')).toBeUndefined();
+      expect((upsert!.args[1] as { onConflict: string }).onConflict)
+        .toBe('tandem_id,rater_id');
+    });
+  });
+
+  it('a SKIP writes checkin_skips and touches NOTHING else', () => {
+    // The load-bearing assertion in this file. A skip must not reach
+    // tandem_feedback (it would inflate the headline metric) and must not reach
+    // interest_events (it would become a negative rating).
+    const { p, recorded } = port();
+    return p.writeCheckInSkip({ tandemId: 't1', raterId: 'u1', createdAt: NOW }).then(() => {
+      const tables = recorded.map((r) => r.table);
+      expect(tables).toContain('checkin_skips');
+      expect(tables).not.toContain('tandem_feedback');
+      expect(tables).not.toContain('interest_events');
+    });
+  });
+
+  it('the skip row carries no rated_id and no polarity', () => {
+    const { p, recorded } = port();
+    return p.writeCheckInSkip({ tandemId: 't1', raterId: 'u1', createdAt: NOW }).then(() => {
+      const rec = recorded.find((r) => r.table === 'checkin_skips') as Recorded;
+      const written = rec.calls.find((c) => c.op === 'upsert')!.args[0] as Record<string, unknown>;
+      expect(Object.keys(written).sort()).toEqual(['created_at', 'rater_id', 'tandem_id']);
+      expect(written).not.toHaveProperty('rated_id');
+      expect(written).not.toHaveProperty('response');
+      expect(written).not.toHaveProperty('polarity');
+    });
+  });
+
+  it('loading skips filters to the one user and carries raterId back', () => {
+    const { p, recorded } = port({
+      skips: [{ tandem_id: 't1', rater_id: 'u1' }, { tandem_id: 't2', rater_id: 'u1' }],
+    });
+    return p.loadSkippedCheckIns('u1').then((skips) => {
+      const rec = recorded.find((r) => r.table === 'checkin_skips') as Recorded;
+      expect(filters(rec).get('eq:rater_id')).toBe('u1');
+      // raterId is carried so pendingCheckIns can filter rather than trust:
+      // both directions of a tandem share a tandemId.
+      expect(skips).toEqual([
+        { tandemId: 't1', raterId: 'u1' },
+        { tandemId: 't2', raterId: 'u1' },
+      ]);
+    });
+  });
+
+  it('a failing skip load degrades to "nothing skipped", which re-asks', () => {
+    // Of the two failure directions this is the recoverable one: an extra
+    // prompt is an annoyance, a check-in silently never asked is a permanently
+    // missing row in the highest-weighted signal in the model.
+    const client: SupabaseLike = { from: () => { throw new Error('down'); } };
+    const errors: string[] = [];
+    const p = createSupabaseRankingPort(
+      client,
+      { distanceMiles: () => 1, newId: () => 'id', now: () => NOW },
+      (where) => errors.push(where),
+    );
+    return p.loadSkippedCheckIns('u1').then((skips) => {
+      expect(skips).toEqual([]);
+      expect(errors).toContain('loadSkippedCheckIns');
+    });
+  });
+});

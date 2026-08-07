@@ -22,6 +22,7 @@ import type {
   ActivityShape,
   Candidate,
   Epoch,
+  CheckInSkip,
   GivenFeedback,
   ImpressionHistory,
   InterestEvent,
@@ -134,6 +135,17 @@ export const COLUMNS = {
     raterId: 'rater_id',
     ratedId: 'rated_id',
     response: 'response',
+    createdAt: 'created_at',
+  },
+  /**
+   * v1.9 §3. Its own table rather than a `response` value on `tandem_feedback`,
+   * because `tandem_feedback` row count is the beta's headline health metric
+   * and a skip is not an answer. See the v1.9 migration header.
+   */
+  checkinSkips: {
+    table: 'checkin_skips',
+    tandemId: 'tandem_id',
+    raterId: 'rater_id',
     createdAt: 'created_at',
   },
   interestEvents: { table: 'interest_events' },
@@ -768,16 +780,72 @@ export function createSupabaseRankingPort(
       const f = COLUMNS.tandemFeedback;
       const values = CONSTANTS.checkin.responseValues;   // [S4] see SCHEMA.md §5
       try {
-        const { error } = await client.from(f.table).insert({
+        // UPSERT, not insert. A double-tap and a retry-after-a-timeout-that-
+        // actually-succeeded both produce a second write that no client-side
+        // guard prevents, and `tandem_feedback` row count is the beta's
+        // headline metric — double-counting there would overstate the one
+        // number anybody is watching.
+        //
+        // Conflict target is (tandem_id, rater_id), matching
+        // `tandem_feedback_one_per_rater_idx`. `rated_id` is excluded because
+        // tandems are pairwise: a rater has exactly one counterpart, and
+        // including it would let a malformed duplicate through under a
+        // different `rated_id`.
+        //
+        // Last write wins, so a person who taps "no" then reopens and taps
+        // "yes" ends with "yes" — which is the answer they meant.
+        const { error } = await client.from(f.table).upsert({
           [f.tandemId]: answer.tandemId,
           [f.raterId]: answer.raterId,
           [f.ratedId]: answer.ratedId,
           [f.response]: answer.positive ? values.positive : values.negative,
           [f.createdAt]: toIso(answer.createdAt),
-        });
+        }, { onConflict: `${f.tandemId},${f.raterId}` });
         if (error) fail('writeCheckIn', error);
       } catch (error) {
         fail('writeCheckIn', error);
+      }
+    },
+
+    async loadSkippedCheckIns(userId: UserId): Promise<CheckInSkip[]> {
+      const s = COLUMNS.checkinSkips;
+      try {
+        const res = await client
+          .from(s.table)
+          .select(`${s.tandemId},${s.raterId}`)
+          .eq(s.raterId, userId);
+        const rows = ((res as unknown as { data: Row[] | null }).data) ?? [];
+        return rows.map((row) => ({
+          tandemId: str(row[s.tandemId]),
+          raterId: str(row[s.raterId]),
+        }));
+      } catch (error) {
+        // Degrade to "nothing was skipped", which RE-ASKS rather than never
+        // asking. Of the two directions this is the recoverable one: an extra
+        // prompt is an annoyance, a check-in silently never asked is a
+        // permanently missing row in the highest-weighted signal in the model.
+        fail('loadSkippedCheckIns', error);
+        return [];
+      }
+    },
+
+    async writeCheckInSkip(skip): Promise<void> {
+      const s = COLUMNS.checkinSkips;
+      try {
+        // Upsert for the same reason as above; the table's primary key is
+        // (tandem_id, rater_id), so skipping twice is one row.
+        //
+        // NOTE what is absent: no rated_id, no polarity, no interest_events
+        // mirror. A skip is not a negative and the write path has nowhere to
+        // put one even by accident.
+        const { error } = await client.from(s.table).upsert({
+          [s.tandemId]: skip.tandemId,
+          [s.raterId]: skip.raterId,
+          [s.createdAt]: toIso(skip.createdAt),
+        }, { onConflict: `${s.tandemId},${s.raterId}` });
+        if (error) fail('writeCheckInSkip', error);
+      } catch (error) {
+        fail('writeCheckInSkip', error);
       }
     },
   };

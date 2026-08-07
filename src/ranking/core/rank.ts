@@ -24,6 +24,8 @@ import { mulberry32, seedFor } from './random.js';
 import { computeRegime, resolveParams } from './regime.js';
 import { RANKER_ENABLED, applyShipGate } from './shipping.js';
 import { EMPTY_SESSION } from './session.js';
+import { SNAPSHOT_VERSION, buildSnapshotApp } from './snapshot.js';
+import type { SnapshotApp } from './snapshot.js';
 import { CONSTANTS } from './constants.js';
 import type {
   ActivityId,
@@ -126,7 +128,7 @@ export function rank(
       // Always populated, debug or not. Instrumentation is the deliverable, not
       // a debugging affordance — and the whole feature set is here, including
       // every feature the shipped ordering ignored.
-      snapshots: cards.map((sc) => snapshotOf(sc, regime)),
+      snapshots: cards.map((sc) => snapshotOf(sc, regime, input.snapshotApp)),
     };
 
     // The numeric internals are opt-in and never reachable from a UI type.
@@ -157,14 +159,24 @@ export function rank(
  * writing them onto every row would duplicate onto ~thousands of impressions
  * something already reconstructable from a git tag.
  */
-function snapshotOf(sc: ScoredCandidate, regime: number): ScoreSnapshot {
+function snapshotOf(
+  sc: ScoredCandidate,
+  regime: number,
+  app?: Partial<SnapshotApp> | null,
+): ScoreSnapshot {
   return {
-    v: CONSTANTS.instrumentation.snapshotVersion,
-    features: sc.features,
-    funnel: sc.funnel,
-    regime,
-    rankerEnabled: RANKER_ENABLED,
-    algo: CONSTANTS.instrumentation.algoVersion,
+    v: SNAPSHOT_VERSION,
+    computed: {
+      features: sc.features,
+      funnel: sc.funnel,
+      regime,
+      rankerEnabled: RANKER_ENABLED,
+      algo: CONSTANTS.instrumentation.algoVersion,
+    },
+    // Always written, always complete, even when the caller supplies nothing.
+    // An un-integrated row is still a well-formed row, which is what lets a
+    // later reader tell "unavailable" from "predates the field".
+    app: buildSnapshotApp(app),
   };
 }
 

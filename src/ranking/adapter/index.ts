@@ -41,6 +41,7 @@ import type {
   RankResult,
   RankingDataPort,
   ResolvedParams,
+  SnapshotApp,
   SessionId,
   SessionShown,
   UserId,
@@ -101,7 +102,16 @@ export interface RankingClient {
   getDeck(
     userId: UserId,
     sessionId: SessionId,
-    options?: RankOptions & { candidates?: Candidate[] },
+    options?: RankOptions & {
+      candidates?: Candidate[];
+      /**
+       * Context only the app has, written onto every snapshot in this deck
+       * (v1.9 §2). Build it off `SNAPSHOT_APP_KEYS` so a typo is a compile
+       * error. Anything omitted is written as `null`, which is deliberately
+       * different from being absent.
+       */
+      snapshotApp?: Partial<SnapshotApp>;
+    },
   ): Promise<RankResult>;
 
   /**
@@ -161,20 +171,38 @@ export interface RankingClient {
    * `interest_events` so the check-in feeds the interest model, which is where
    * the highest-weighted source in the whole table lives.
    *
-   * There is no `skipCheckIn`. A skip writes NOTHING, so it comes back next
-   * time — a person who did not answer is not a person who said no, and storing
-   * a skip as a negative teaches people that the honest answer has
-   * consequences.
+   * IDEMPOTENT. A double-tap or a retry after a timeout that actually succeeded
+   * writes one row, enforced in the database rather than only here.
+   *
+   * Pass the whole `PendingCheckIn` through: `category` and `activityId` come
+   * from it, and without `category` the interest mirror is skipped entirely
+   * (see [S1] in SCHEMA.md).
    */
-  submitCheckIn(answer: {
+  recordCheckIn(answer: {
     tandemId: string;
     raterId: UserId;
     ratedId: UserId;
-    positive: boolean;
+    /** The binary answer. `true` = would tandem with them again. */
+    response: boolean;
     /** From the pending record. Absent -> the interest mirror is skipped. */
     category?: MetricSlug;
     activityId?: ActivityId;
   }): Promise<void>;
+
+  /**
+   * Record that the user dismissed this check-in, so it is not asked again
+   * (v1.9 §3).
+   *
+   * **A SKIP IS NOT A NEGATIVE.** It writes `checkin_skips` and nothing else —
+   * no `tandem_feedback` row, no `interest_events` row, no polarity anywhere.
+   * A person who did not answer is not a person who said no, and conflating the
+   * two teaches people that answering honestly has consequences, which costs
+   * the signal permanently rather than just for that row.
+   *
+   * No `ratedId` parameter, deliberately: there is no judgement about a person
+   * here, and an argument that cannot express one cannot be misused to.
+   */
+  skipCheckIn(tandemId: string, raterId: UserId): Promise<void>;
 
   /**
    * The buffered impression writer (v1.7 §2.1).
@@ -306,6 +334,10 @@ export function createRankingClient(config: RankingClientConfig): RankingClient 
           viewer, candidates, interestEvents: events, sessionId, now: t,
           regime: reading.regime,
           sessionShown: sessionShown.get(sessionId) ?? EMPTY_SESSION,
+          // v1.9 §2. Passed straight through to every snapshot in this deck.
+          // Omitted keys are written as null by `buildSnapshotApp`, so an app
+          // that supplies nothing still produces well-formed rows.
+          ...(options.snapshotApp ? { snapshotApp: options.snapshotApp } : {}),
         },
         options,
         (reason) => config.onError?.('rank', reason.error),
@@ -370,11 +402,14 @@ export function createRankingClient(config: RankingClientConfig): RankingClient 
 
     async getPendingCheckIns(userId, opts = {}) {
       try {
-        const [tandems, given] = await Promise.all([
+        // One round of parallel reads, not three sequential ones. The check-in
+        // prompt sits on the app-open path and this is the whole of its cost.
+        const [tandems, given, skipped] = await Promise.all([
           port.loadCompletedTandems(userId),
           port.loadGivenFeedback(userId),
+          port.loadSkippedCheckIns(userId),
         ]);
-        const pending = pendingCheckIns(userId, tandems, given, now());
+        const pending = pendingCheckIns(userId, tandems, given, now(), skipped);
         return opts.all ? pending : checkInsToPrompt(pending);
       } catch (error) {
         // Ask nobody rather than risk re-asking everybody. A check-in the user
@@ -385,8 +420,9 @@ export function createRankingClient(config: RankingClientConfig): RankingClient 
       }
     },
 
-    async submitCheckIn({ tandemId, raterId, ratedId, positive, category, activityId }) {
+    async recordCheckIn({ tandemId, raterId, ratedId, response, category, activityId }) {
       const t = now();
+      const positive = response;
 
       await port.writeCheckIn({ tandemId, raterId, ratedId, positive, createdAt: t });
 
@@ -423,6 +459,20 @@ export function createRankingClient(config: RankingClientConfig): RankingClient 
         ...(activityId ? { activityId } : {}),
         hostId: ratedId,
       });
+    },
+
+    async skipCheckIn(tandemId, raterId) {
+      // The entire implementation. Note what is NOT here: no writeCheckIn, no
+      // appendInterestEvent, no polarity of any kind.
+      //
+      // Also NOT here: an `instrumentation.record()` call. Skip RATE is worth
+      // watching — a high one means the prompt is badly timed or badly worded —
+      // but `checkin_skips` already carries `created_at`, so the rate is one
+      // query away without a `ranking_events` row. Adding a `checkin_skip`
+      // event type would mean widening the `ranking_events.event_type` CHECK
+      // constraint, whose exact definition is not verifiable from this repo, to
+      // record something already recorded.
+      await port.writeCheckInSkip({ tandemId, raterId, createdAt: now() });
     },
 
     instrumentation,

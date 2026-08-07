@@ -7,6 +7,9 @@
  */
 
 import type { SessionShown } from './session.js';
+import type { SnapshotApp, SnapshotComputed } from './snapshot.js';
+
+export type { SnapshotApp, SnapshotComputed } from './snapshot.js';
 
 export type { SessionShown } from './session.js';
 
@@ -444,18 +447,27 @@ export interface ScoreSnapshot {
    * Schema version of this object. Bump it when the shape changes, and never
    * reinterpret an older `v` under newer rules — a training set silently
    * spanning two feature definitions is worse than one that spans none.
+   *
+   * See `snapshot.ts` for the changelog, and for why v2 is not v1.
    */
   v: number;
-  /** Every feature computed, whether or not the shipped ordering used it. */
-  features: FeatureVector;
-  /** The decomposed funnel, including factors currently gated off. */
-  funnel: FunnelScore;
-  /** Density scalar in force, 0 village to 1 city. */
-  regime: number;
-  /** False when the ranker was shelved and the deck was proximity-ordered. */
-  rankerEnabled: boolean;
-  /** Identifies the parameter table in force, so `regime` can be resolved later. */
-  algo: string;
+
+  /**
+   * Everything THIS MODULE calculates. Always fully populated.
+   *
+   * v1 carried these five fields at the top level. They moved under `computed`
+   * in v2 so that `app` could sit beside them without the two being
+   * confusable — a missing key here is a bug in this module, while a missing
+   * key in `app` is an integration that has not happened yet.
+   */
+  computed: SnapshotComputed;
+
+  /**
+   * Context only the parent app has: filters, entry point, app version.
+   * Every key always present, `null` until populated. Partial population is
+   * expected and is not an error.
+   */
+  app: SnapshotApp;
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +603,20 @@ export interface RankInput {
    * none.
    */
   sessionShown?: SessionShown;
+
+  /**
+   * Context only the parent app has, written verbatim onto every snapshot in
+   * this deck (v1.9 §2).
+   *
+   * Per-deck rather than per-card because that is how the values actually
+   * behave: `active_filters` and `entry_point` are properties of the fetch, not
+   * of the card. Pass what is known; everything omitted is written as `null`,
+   * which is a different and more useful thing than being absent.
+   *
+   * Import `SNAPSHOT_APP_KEYS` and build this object off it — a typo'd key is
+   * then a compile error rather than a column of nulls discovered in a month.
+   */
+  snapshotApp?: Partial<SnapshotApp>;
 }
 
 // ---------------------------------------------------------------------------
@@ -664,11 +690,34 @@ export interface RankingDataPort {
   loadGivenFeedback(userId: UserId): Promise<GivenFeedback[]>;
 
   /**
+   * Check-ins this user dismissed, so a dismissed prompt does not return
+   * (v1.9 §3). Reads `checkin_skips`.
+   *
+   * Degrades to `[]` on any failure, which re-asks rather than never asking.
+   * Of the two failure directions that is the recoverable one: an extra prompt
+   * is an annoyance, a check-in silently never asked is a permanently missing
+   * row in the highest-weighted signal in the model.
+   */
+  loadSkippedCheckIns(userId: UserId): Promise<CheckInSkip[]>;
+
+  /**
    * Record one check-in answer. Writes `tandem_feedback` — which is already
    * per-pair (`tandem_id`, `rater_id`, `rated_id`, `response`) and needed no
    * migration at all.
+   *
+   * Must be idempotent: a double-tap or a retry-after-timeout must not produce
+   * two rows. Enforced by `tandem_feedback_one_per_rater_idx`.
    */
   writeCheckIn(answer: CheckInAnswer): Promise<void>;
+
+  /**
+   * Record that the rater dismissed this check-in (v1.9 §3).
+   *
+   * Writes `checkin_skips` and NOTHING else. In particular it must never write
+   * an `interest_events` row: a skip is not a negative answer, and the schema
+   * is shaped so that it cannot become one.
+   */
+  writeCheckInSkip(skip: { tandemId: string; raterId: UserId; createdAt: Epoch }): Promise<void>;
 }
 
 /** One check-in answer, on its way to `tandem_feedback`. */
@@ -727,6 +776,31 @@ export interface PendingCheckIn {
 export interface GivenFeedback {
   tandemId: string;
   ratedId: UserId;
+}
+
+/**
+ * A check-in the rater declined to answer (v1.9 §3).
+ *
+ * NOT a negative rating. There is deliberately no `ratedId` and no polarity on
+ * this type: a skip is a statement about the prompt, not about the person, and
+ * a shape that cannot express a judgement cannot later be mistaken for one.
+ */
+export interface CheckInSkip {
+  tandemId: string;
+  /**
+   * Who declined. Carried explicitly even though the adapter only ever loads
+   * one user's skips, so that `pendingCheckIns` can filter rather than TRUST
+   * that it was handed the right list.
+   *
+   * Without it, one person skipping suppresses the prompt for their
+   * counterpart — the two directions of a tandem share a `tandemId`. That is a
+   * silent, plausible-looking bug that costs the other person's answer, and the
+   * type is the cheapest place to make it impossible.
+   *
+   * Note this is `raterId`, never `ratedId`: it records who did not answer, not
+   * a judgement about anyone.
+   */
+  raterId: UserId;
 }
 
 /** What the adapter persists between sessions for the density estimate. */

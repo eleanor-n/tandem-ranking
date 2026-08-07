@@ -37,6 +37,7 @@
  */
 
 import { CONSTANTS } from '../core/constants.js';
+import { validateSnapshotApp } from '../core/snapshot.js';
 import type {
   ActivityId,
   Epoch,
@@ -158,6 +159,8 @@ export function createInstrumentation(config: InstrumentationConfig): Instrument
   let dropped = 0;
   let consecutiveFailures = 0;
   let flushing = false;
+  /** v1.9 §2.4 — the `app` shape is checked once per session, not per card. */
+  let snapshotAppWarned = false;
 
   let flushTimer: unknown = null;
   let persistTimer: unknown = null;
@@ -259,6 +262,11 @@ export function createInstrumentation(config: InstrumentationConfig): Instrument
   return {
     startSession(id) {
       sessionId = id ?? makeSessionId();
+      // Re-arm the §2.4 check. Once per SESSION, not once per process: a new
+      // foreground can carry a new app build with a different `app` payload,
+      // and a check that fires only on the first launch after install would
+      // miss exactly the regression it exists to catch.
+      snapshotAppWarned = false;
       return sessionId;
     },
 
@@ -267,6 +275,30 @@ export function createInstrumentation(config: InstrumentationConfig): Instrument
     recordDeck(userId, result) {
       const at = config.now();
       const { cards } = result.slate;
+
+      // v1.9 §2.4. Once per session, on the first deck that carries a snapshot.
+      //
+      // Never throws and never blocks a render: a malformed `app` object is a
+      // data-quality problem, and taking down someone's Discover tab over one
+      // is not a trade anybody would choose. It warns rather than repairing,
+      // because silently filling in a missing key would hide the integration
+      // gap this check exists to surface.
+      if (!snapshotAppWarned) {
+        const first = result.snapshots[0];
+        if (first) {
+          snapshotAppWarned = true;
+          const problems = validateSnapshotApp(first.app);
+          if (problems.length > 0) {
+            config.onError?.(
+              'snapshot.app',
+              new Error(
+                `score_snapshot.app is malformed (${problems.length} issue(s)); ` +
+                'impressions are still being logged. ' + problems.join(' | '),
+              ),
+            );
+          }
+        }
+      }
 
       for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
