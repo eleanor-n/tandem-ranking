@@ -164,6 +164,21 @@ where the funnel bought repeat rate and paid for it in concentration.
 
 At the shipped ρ = 0.5, **Gini is 0.821. By that criterion the repair failed.**
 
+> **v1.9, 24 seeds, N=600:** 0.840 ±0.001 — confirmed, and not marginal. After
+> the abort (ρ = 0) the same arm measures **0.464 ±0.002**, a 92.9× separation
+> on matched seeds. Host retention goes 0.843 → 0.939 (12.4×), zero-joiner posts
+> 33.3% → 12.9%, surviving hosts 16.6% → 52.8%, and deck relevance *rises*
+> 0.114 → 0.128. Five of the seven arms are byte-identical across the two runs,
+> which is what makes that a measurement. See DIAGNOSTICS.md §F4.
+>
+> The abort worked. What it bought, precisely: the arm now clears `random`
+> decisively (11.9×) where it previously lost to it, and clears the 0.75 Gini
+> ceiling — but it is **statistically tied with `proximity_only` on retention**
+> (0.92×) while beating it on Gini by 13.7×. Against the taste-blind baseline
+> the ranker currently buys no measurable retention and a materially better
+> distribution. That is a narrower claim than "the ranker works", and it is the
+> one the data supports.
+
 ### But it fails informatively, and "drop it" is not what the data says
 
 ρ = 0 does **not** delete `hostReliability`. It removes it as a **main effect**
