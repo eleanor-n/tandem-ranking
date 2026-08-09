@@ -19,7 +19,7 @@
 import { rank } from '../core/rank.js';
 import { buildExplicitStatement, computeInterestState, isCacheFresh, rebuildInterestStateFromEvents } from '../core/interest.js';
 import { computeRegime, paramsFingerprint, resolveParams } from '../core/regime.js';
-import { checkInsToPrompt, pendingCheckIns } from '../core/checkin.js';
+import { checkInsToPrompt, nextSkipRetry, pendingCheckIns } from '../core/checkin.js';
 import { EMPTY_SESSION, noteShown } from '../core/session.js';
 import { CONSTANTS } from '../core/constants.js';
 import { createInstrumentation } from './instrumentation.js';
@@ -190,8 +190,13 @@ export interface RankingClient {
   }): Promise<void>;
 
   /**
-   * Record that the user dismissed this check-in, so it is not asked again
-   * (v1.9 §3).
+   * Record that the user dismissed this check-in (v1.9 §3, softened in v1.9.1
+   * §3).
+   *
+   * The dismissal is SOFT: the first call snoozes the prompt for
+   * `skipRetryDays`, the second retires it permanently. Call this the same way
+   * both times — the escalation is handled here, and a second call for the same
+   * pair is the mechanism, not a double-submit.
    *
    * **A SKIP IS NOT A NEGATIVE.** It writes `checkin_skips` and nothing else —
    * no `tandem_feedback` row, no `interest_events` row, no polarity anywhere.
@@ -472,7 +477,27 @@ export function createRankingClient(config: RankingClientConfig): RankingClient 
       // event type would mean widening the `ranking_events.event_type` CHECK
       // constraint, whose exact definition is not verifiable from this repo, to
       // record something already recorded.
-      await port.writeCheckInSkip({ tandemId, raterId, createdAt: now() });
+      //
+      // The read below is what makes the skip SOFT (v1.9.1 §3): a first skip
+      // earns a retry, a second retires the check-in. It costs one extra round
+      // trip on an action taken rarely, which is a better trade than putting the
+      // escalation in SQL, where it would be invisible from here and untestable
+      // without a database.
+      //
+      // `loadSkippedCheckIns` degrades to `[]` rather than throwing, so a failed
+      // read makes a second skip look like a first and the prompt returns once
+      // more. That is the recoverable direction on purpose — an extra prompt is
+      // an annoyance, a lost label is permanent.
+      const t = now();
+      const existing = (await port.loadSkippedCheckIns(raterId))
+        .find((s) => s.tandemId === tandemId && s.raterId === raterId);
+
+      await port.writeCheckInSkip({
+        tandemId,
+        raterId,
+        createdAt: t,
+        retryAfter: nextSkipRetry(existing, t),
+      });
     },
 
     instrumentation,

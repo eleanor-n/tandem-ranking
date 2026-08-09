@@ -28,6 +28,9 @@ import {
   type SupabaseLike,
   type SupabaseLikeQuery,
 } from '../src/ranking/adapter/supabase.js';
+import { createRankingClient } from '../src/ranking/adapter/index.js';
+import { CONSTANTS } from '../src/ranking/core/constants.js';
+import type { CheckInSkip, RankingDataPort } from '../src/ranking/core/types.js';
 
 // ---------------------------------------------------------------------------
 // A recording fake
@@ -330,7 +333,9 @@ describe('check-in writes (v1.9 §3)', () => {
     // tandem_feedback (it would inflate the headline metric) and must not reach
     // interest_events (it would become a negative rating).
     const { p, recorded } = port();
-    return p.writeCheckInSkip({ tandemId: 't1', raterId: 'u1', createdAt: NOW }).then(() => {
+    return p.writeCheckInSkip({
+      tandemId: 't1', raterId: 'u1', createdAt: NOW, retryAfter: NOW + 1000,
+    }).then(() => {
       const tables = recorded.map((r) => r.table);
       expect(tables).toContain('checkin_skips');
       expect(tables).not.toContain('tandem_feedback');
@@ -340,28 +345,55 @@ describe('check-in writes (v1.9 §3)', () => {
 
   it('the skip row carries no rated_id and no polarity', () => {
     const { p, recorded } = port();
-    return p.writeCheckInSkip({ tandemId: 't1', raterId: 'u1', createdAt: NOW }).then(() => {
+    return p.writeCheckInSkip({
+      tandemId: 't1', raterId: 'u1', createdAt: NOW, retryAfter: NOW + 1000,
+    }).then(() => {
       const rec = recorded.find((r) => r.table === 'checkin_skips') as Recorded;
       const written = rec.calls.find((c) => c.op === 'upsert')!.args[0] as Record<string, unknown>;
-      expect(Object.keys(written).sort()).toEqual(['created_at', 'rater_id', 'tandem_id']);
+      expect(Object.keys(written).sort())
+        .toEqual(['created_at', 'rater_id', 'retry_after', 'tandem_id']);
       expect(written).not.toHaveProperty('rated_id');
       expect(written).not.toHaveProperty('response');
       expect(written).not.toHaveProperty('polarity');
     });
   });
 
-  it('loading skips filters to the one user and carries raterId back', () => {
+  it('a retirement writes SQL NULL, not a missing column (v1.9.1 §3)', () => {
+    // The second skip is an UPDATE onto an existing row. If `retry_after` were
+    // omitted from the payload rather than sent as null, the upsert would leave
+    // the first skip's retry in place and the check-in would come back a third
+    // time — the exact behaviour the retirement exists to stop.
+    const { p, recorded } = port();
+    return p.writeCheckInSkip({
+      tandemId: 't1', raterId: 'u1', createdAt: NOW, retryAfter: null,
+    }).then(() => {
+      const rec = recorded.find((r) => r.table === 'checkin_skips') as Recorded;
+      const written = rec.calls.find((c) => c.op === 'upsert')!.args[0] as Record<string, unknown>;
+      expect('retry_after' in written).toBe(true);
+      expect(written['retry_after']).toBeNull();
+    });
+  });
+
+  it('loading skips filters to the one user and carries raterId and retryAfter back', () => {
+    const iso = new Date(NOW + 5 * 86_400_000).toISOString();
     const { p, recorded } = port({
-      skips: [{ tandem_id: 't1', rater_id: 'u1' }, { tandem_id: 't2', rater_id: 'u1' }],
+      skips: [
+        { tandem_id: 't1', rater_id: 'u1', retry_after: iso },
+        { tandem_id: 't2', rater_id: 'u1', retry_after: null },
+      ],
     });
     return p.loadSkippedCheckIns('u1').then((skips) => {
       const rec = recorded.find((r) => r.table === 'checkin_skips') as Recorded;
       expect(filters(rec).get('eq:rater_id')).toBe('u1');
       // raterId is carried so pendingCheckIns can filter rather than trust:
       // both directions of a tandem share a tandemId.
+      //
+      // retryAfter must come back as null and NOT as 0. `toEpoch` maps anything
+      // unparseable to 0, which here would read as "askable since 1970" and
+      // silently un-retire every retired skip — hence `epochOrNull`.
       expect(skips).toEqual([
-        { tandemId: 't1', raterId: 'u1' },
-        { tandemId: 't2', raterId: 'u1' },
+        { tandemId: 't1', raterId: 'u1', retryAfter: NOW + 5 * 86_400_000 },
+        { tandemId: 't2', raterId: 'u1', retryAfter: null },
       ]);
     });
   });
@@ -380,6 +412,84 @@ describe('check-in writes (v1.9 §3)', () => {
     return p.loadSkippedCheckIns('u1').then((skips) => {
       expect(skips).toEqual([]);
       expect(errors).toContain('loadSkippedCheckIns');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The client's skip escalation (v1.9.1 §3)
+// ---------------------------------------------------------------------------
+// `nextSkipRetry` is tested pure in checkin.test.ts and `writeCheckInSkip` is
+// tested above. What is untested by either is the GLUE: skipCheckIn reads the
+// existing skips, decides, and writes. That composition is where a soft skip
+// silently becomes a hard one — read the wrong user's rows, or forget to read
+// at all, and every skip looks like a first skip forever.
+
+describe('skipCheckIn escalates on the second skip', () => {
+  function client(existing: CheckInSkip[]) {
+    const writes: Array<{ tandemId: string; raterId: string; retryAfter: number | null }> = [];
+    const loadedFor: string[] = [];
+    const port = {
+      async loadSkippedCheckIns(userId: string) {
+        loadedFor.push(userId);
+        return existing.filter((s) => s.raterId === userId);
+      },
+      async writeCheckInSkip(skip: {
+        tandemId: string; raterId: string; createdAt: number; retryAfter: number | null;
+      }) {
+        writes.push({
+          tandemId: skip.tandemId, raterId: skip.raterId, retryAfter: skip.retryAfter,
+        });
+      },
+    } as unknown as RankingDataPort;
+    return {
+      ranking: createRankingClient({ port, now: () => NOW }),
+      writes,
+      loadedFor,
+    };
+  }
+
+  it('a first skip writes a retry, not a retirement', () => {
+    const { ranking, writes, loadedFor } = client([]);
+    return ranking.skipCheckIn('t1', 'u1').then(() => {
+      expect(loadedFor).toEqual(['u1']);
+      expect(writes).toEqual([{
+        tandemId: 't1',
+        raterId: 'u1',
+        retryAfter: NOW + CONSTANTS.checkin.skipRetryDays * 86_400_000,
+      }]);
+    });
+  });
+
+  it('a second skip on the same pair retires it', () => {
+    const { ranking, writes } = client([
+      { tandemId: 't1', raterId: 'u1', retryAfter: NOW + 1000 },
+    ]);
+    return ranking.skipCheckIn('t1', 'u1').then(() => {
+      expect(writes[0]!.retryAfter).toBeNull();
+    });
+  });
+
+  it('a skip on a DIFFERENT tandem is still a first skip', () => {
+    // The lookup must key on the pair, not just the user. Matching on rater
+    // alone would retire a check-in the person has never dismissed.
+    const { ranking, writes } = client([
+      { tandemId: 't_other', raterId: 'u1', retryAfter: NOW + 1000 },
+    ]);
+    return ranking.skipCheckIn('t1', 'u1').then(() => {
+      expect(writes[0]!.retryAfter).not.toBeNull();
+    });
+  });
+
+  it("someone else's skip on the same tandem does not retire mine", () => {
+    // Both directions of a tandem share a tandemId. Keying on it alone would
+    // let one person's dismissal retire their counterpart's — the same pairwise
+    // bug the CheckInSkip type was reshaped to prevent, one layer up.
+    const { ranking, writes } = client([
+      { tandemId: 't1', raterId: 'u_other', retryAfter: NOW + 1000 },
+    ]);
+    return ranking.skipCheckIn('t1', 'u1').then(() => {
+      expect(writes[0]!.retryAfter).not.toBeNull();
     });
   });
 });

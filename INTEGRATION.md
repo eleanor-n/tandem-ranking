@@ -47,7 +47,7 @@ against a schema that was not available and guessed wrong in three places.
 |---|---|---|
 | `20260802100000_ranking_v1_7_instrumentation.sql` | impression logging, `session_id`, `graph_edges` rebuild | yes — invisible |
 | `20260807090000_ranking_v1_9_indexes.sql` | 7 indexes, `CONCURRENTLY` | yes — invisible |
-| `20260808090000_ranking_v1_9_checkin_skips.sql` | `checkin_skips` table, check-in idempotency index | yes — invisible |
+| `20260808090000_ranking_v1_9_checkin_skips.sql` | `checkin_skips` table + `retry_after`, check-in idempotency index, three RLS policies | yes — invisible |
 
 The two v1.9 files are additive and idempotent: no column is dropped, retyped,
 or rewritten. Both carry `VERIFY` and `ROLLBACK` blocks at the bottom.
@@ -124,6 +124,8 @@ bounded it spatially. **Treat that warning as a bug, not a notice.**
 | `RANKER_ENABLED` | `core/shipping.ts` | `false` | the ranking model. Leave off. |
 | `exhaustionRate` | `core/constants.ts` | `0` | disabled until check-in data exists |
 | `demandWeight` | `core/constants.ts` | `0.10` | the empty-post boost. See §7. |
+| `eligibilityWindowDays` | `core/constants.ts` | `7` | how long a check-in stays askable. `UNMEASURED`. See §5. |
+| `skipRetryDays` | `core/constants.ts` | `5` | how long a first skip snoozes for. `UNMEASURED`. See §5. |
 
 ---
 
@@ -194,10 +196,58 @@ await ranking.skipCheckIn(p.tandemId, userId);
 ```
 
 `recordCheckIn` is idempotent: a double-tap or a retry after a timeout that
-actually succeeded writes one row. A skip is remembered and not asked again.
+actually succeeded writes one row.
+
+### Two things your UI can assume, and one it cannot
+
+**1. The queue is bounded. A check-in expires after 7 days.**
+
+Past `eligibilityWindowDays`, a tandem stops being askable and `getPendingCheckIns`
+stops returning it. There is no backlog and there is no "you have 12 pending
+check-ins" state to design for — the most you will ever be handed is one.
+
+This is deliberate, not a cleanup. Recall on a three-week-old coffee is poor, so
+those answers would be noise, and noise is worse than absence in this particular
+signal because nothing downstream can tell a guessed answer from a remembered
+one. **Do not build a catch-up screen**, and do not treat an expiring check-in as
+something to chase with a push notification — it expires because the answer would
+not have been worth having.
+
+Practical consequence: a person who does not open the app for a week owes
+nothing when they come back. That is the intended behaviour.
+
+**2. A skip is soft. The first one is a snooze, the second is final.**
+
+| skip | what happens |
+|---|---|
+| first | asked once more, ~5 days later — if that still falls inside the 7-day window |
+| second | never asked again |
+
+So `skipCheckIn` may be called twice for the same tandem, and the second call is
+not a bug or a double-submit — it is the escalation. The client handles this
+itself; you call the same function both times and pass nothing extra.
+
+The asymmetry is the point. One dismissal is ambiguous: a mis-tap, a bad moment,
+someone mid-something-else. Two is an answer. `tandem_feedback` is the only
+source of pairwise data anywhere in this system, so spending a label permanently
+on a single ambiguous tap is the wrong price — and continuing to ask past two
+reads as the app not listening.
+
+Because `skipRetryDays` (5) is less than `eligibilityWindowDays` (7), a retry
+only has room when the skip happened early in the window. A skip late in the
+window simply expires and never returns. That is fine and needs no handling.
+
+**What you cannot assume: that a skipped prompt is gone for good.** If your UI
+caches "already dismissed" locally and suppresses the prompt on that basis, the
+retry never surfaces and the soft skip silently becomes the hard one it replaced.
+Let `getPendingCheckIns` decide.
+
+### Ordering
 
 Check-ins are surfaced **most recent first**, because an answer about last
-Tuesday is worth more than an answer about six weeks ago.
+Tuesday is worth more than an answer about six weeks ago. With the 7-day window
+in place, nothing can be starved by fresher arrivals — the earlier tradeoff
+between queue fairness and answer quality no longer exists.
 
 ### The four constraints
 
@@ -214,7 +264,8 @@ costs the signal permanently rather than just degrading it.
    already worse than the first.
 4. **Skippable without penalty.** A skip must be as easy as an answer. A person
    who did not answer is not a person who said no — `skipCheckIn` writes no
-   feedback row, no interest event, and no polarity anywhere.
+   feedback row, no interest event, and no polarity anywhere. It goes to its own
+   table, which has no `rated_id` column to put a judgement in even by mistake.
 
 ### If `tandems.activity_id` does not exist
 
@@ -250,7 +301,7 @@ is the number that predicts them never posting again.
 
 | trigger | do this | why |
 |---|---|---|
-| **~100 judgeable posts** | `sql/churn_per_empty_post.sql` | measures `churnPerEmptyPost`, currently an invented `0.18`. It is the only thing that can justify moving `demandWeight` |
+| **~100 judgeable posts** | `sql/churn_per_empty_post.sql` | measures `churnPerEmptyPost`, currently an invented `0.18`. It is the only thing that can justify moving `demandWeight`. It reports both arms at 14 **and** 30 days: if those two disagree, the estimate is measuring the censoring window rather than host behaviour and nothing moves (case D, which gates the rest) |
 | **~500 activities** or **~200 users** | `PERF.md` §3 and §5 | the two deferred performance items start to bite around there |
 | `ranking_events` past ~1M rows | `PERF.md` §5 | decide on retention before it is 11 GB |
 | any change to `demandWeight` | the churn query again | check the assumption still holds |
@@ -287,6 +338,10 @@ nobody can set correctly without real users:
 - `assumedDurationHours` (2) — how long an activity lasts when `activities` has
   no end time. Only affects *when* a check-in is asked
 - `minElapsedHours` (2) — how long after an activity to ask
+- `eligibilityWindowDays` (7) — where recall falls off enough that the answer
+  stops being worth having. Needs answer-latency data to fit properly
+- `skipRetryDays` (5) — how long a first skip snoozes. A guess at "long enough
+  that it does not feel like nagging"
 - `flushIntervalMs` (10s) / `flushAtEvents` (20) — impression batching. Nobody
   knows the real swipe rate yet
 - session penalty constants — chosen without knowing median session length

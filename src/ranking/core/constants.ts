@@ -835,23 +835,76 @@ export const CONSTANTS = {
     maxPromptsPerAppOpen: 1,
 
     /**
+     * [UNMEASURED] [v1.9.1 §2] How long after a tandem ends it stays askable.
+     *
+     * Past this, the check-in is dropped rather than queued. Not asking is the
+     * INTENDED behaviour, not a loss: recall on a three-week-old coffee is poor,
+     * and an answer given from a vague memory is a row of noise in the
+     * highest-weighted signal the system has. A label you cannot trust is worse
+     * than no label, because nothing downstream can tell them apart.
+     *
+     * This is also what makes the most-recent-first ordering safe. Without a
+     * window, pending check-ins accumulate forever and `maxPromptsPerAppOpen = 1`
+     * means an old one could be starved indefinitely by fresher arrivals — a
+     * real cost, documented as such in v1.9. With the window, the same check-in
+     * simply expires, which is what should happen to it anyway. The ordering
+     * tradeoff is not resolved so much as dissolved.
+     *
+     * Raising it buys more labels of worse quality. Lowering it does the
+     * reverse. 7 days is a guess at where recall falls off and needs replacing
+     * the moment there is answer-latency data to fit it to.
+     */
+    eligibilityWindowDays: 7,
+
+    /**
+     * [UNMEASURED] [v1.9.1 §3] How long a skipped check-in waits before it may
+     * be asked once more.
+     *
+     * The skip is SOFT. A first skip sets a retry this many days out; a second
+     * skip on the same (tandem, rater) retires it permanently. v1.9 specified
+     * hard suppression and that was an error: labels are the scarcest resource
+     * in this system, and one mis-tap should not cost one permanently.
+     *
+     * Asymmetric on purpose. One dismissal is ambiguous — a mis-tap, a bad
+     * moment, a person mid-something-else. Two is an answer, and continuing to
+     * ask past it reads as the app not listening.
+     *
+     * The retry is still subject to `eligibilityWindowDays`, so a skip late in
+     * the window expires before it can return. That is the common case and it
+     * is fine: 5 < 7 only leaves room when the skip happened early.
+     */
+    skipRetryDays: 5,
+
+    /**
      * The wire names for the `interest_events` mirror.
      *
-     * NAMING CONFLICT, surfaced rather than resolved silently — see SCHEMA.md §6.
-     * The build prompt says `checkin_positive` / `checkin_negative`; this repo
-     * has used `checkin_yes` / `checkin_no` since v1.5, and those slugs are
-     * load-bearing in three places, one of which is the INTEREST_SOURCES weight
-     * table. Writing the other names would produce rows matching no source
-     * entry, so they would fold in at ZERO weight — the most predictive signal
-     * in the model, silently contributing nothing.
+     * **CANONICAL: `checkin_yes` / `checkin_no`.** See SCHEMA.md §6.
      *
-     * Every write routes through this map, so renaming is one edit here plus a
-     * widened check constraint, and the weights come along.
+     * `tandem-matching-v2-framework.md` §1.2 says `checkin_positive` /
+     * `checkin_negative`. It is wrong, and it is the ROOT CAUSE of a drift that
+     * has been reintroduced three builds running: the document gets re-read each
+     * pass, the wrong slugs come back, and they get re-rejected here.
+     *
+     * Why they must be rejected: these slugs key `CONSTANTS.interest.sources`
+     * (`checkin_yes` is weight 1.2 at a 120-day half-life — the highest and
+     * longest in the table). A row written under a name with no entry there
+     * folds in at ZERO weight. Nothing errors, the row count looks right, and
+     * the single most predictive signal in the model contributes nothing.
+     *
+     * The `satisfies` clause below is what makes that a BUILD failure rather
+     * than a quiet one: these values must be members of `InterestSource`, which
+     * is the same union `interest.sources` is keyed by. `tests/checkin.test.ts`
+     * asserts the same thing at runtime, for the case where someone widens the
+     * union without adding the table entry.
+     *
+     * Every write routes through this map, so if the framework document is ever
+     * declared authoritative, renaming is one edit here plus a widened check
+     * constraint — and the weights come along.
      */
     interestSource: {
       positive: 'checkin_yes',
       negative: 'checkin_no',
-    },
+    } satisfies Record<'positive' | 'negative', InterestSource>,
 
     /**
      * [S4 in SCHEMA.md] What goes in `tandem_feedback.response`. The column's

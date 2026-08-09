@@ -711,13 +711,27 @@ export interface RankingDataPort {
   writeCheckIn(answer: CheckInAnswer): Promise<void>;
 
   /**
-   * Record that the rater dismissed this check-in (v1.9 §3).
+   * Record that the rater dismissed this check-in (v1.9 §3, softened in v1.9.1
+   * §3).
    *
    * Writes `checkin_skips` and NOTHING else. In particular it must never write
    * an `interest_events` row: a skip is not a negative answer, and the schema
    * is shaped so that it cannot become one.
+   *
+   * `retryAfter` carries the escalation: a timestamp on the first skip, `null`
+   * on the second. The DECISION is made in `core/checkin.ts`
+   * (`nextSkipRetry`) — the port only persists what it is handed, so an adapter
+   * cannot quietly acquire its own retry policy.
+   *
+   * Must be idempotent on (tandemId, raterId): the table's primary key is that
+   * pair, so a repeat write updates rather than duplicating.
    */
-  writeCheckInSkip(skip: { tandemId: string; raterId: UserId; createdAt: Epoch }): Promise<void>;
+  writeCheckInSkip(skip: {
+    tandemId: string;
+    raterId: UserId;
+    createdAt: Epoch;
+    retryAfter: Epoch | null;
+  }): Promise<void>;
 }
 
 /** One check-in answer, on its way to `tandem_feedback`. */
@@ -801,6 +815,21 @@ export interface CheckInSkip {
    * a judgement about anyone.
    */
   raterId: UserId;
+  /**
+   * When this check-in becomes askable again, or `null` for never (v1.9.1 §3).
+   *
+   * The skip is SOFT. One dismissal is ambiguous — a mis-tap, a bad moment —
+   * and labels are the scarcest resource in this system, so a first skip buys a
+   * delay rather than a deletion. A second skip on the same (tandem, rater)
+   * sets this to `null` and retires it.
+   *
+   * NOT optional and NOT `undefined`-able, deliberately. `null` here means
+   * "decided: never again". If the field could go missing, a row written before
+   * this existed would be indistinguishable from a deliberate retirement, and
+   * the reader would have to guess which. There are no such rows — the column
+   * and the table ship together — and the type keeps it that way.
+   */
+  retryAfter: Epoch | null;
 }
 
 /** What the adapter persists between sessions for the density estimate. */

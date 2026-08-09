@@ -118,24 +118,49 @@ retrieval source returns `[]`, both with their final signatures.
 
 ---
 
-## 6. Naming conflict, surfaced rather than resolved silently
+## 6. Check-in slugs — CANONICAL
 
-The v1.7 build prompt says to mirror check-ins into `interest_events` as
-**`checkin_positive` / `checkin_negative`**. This repo has used
-**`checkin_yes` / `checkin_no`** since v1.5, and those slugs are load-bearing in
-three places: the `ranking_events.event_type` check constraint, the
-`INTEREST_SOURCES` weight/half-life table (1.2 @ 120d and 0.8 @ 90d — the
+> **The canonical slugs are `checkin_yes` / `checkin_no`.** This section is the
+> authority. Anything that says otherwise, including
+> `tandem-matching-v2-framework.md` §1.2, is wrong and should be corrected
+> against this.
+
+Used since v1.5, and load-bearing in three places: the
+`ranking_events.event_type` check constraint, the `interest.sources`
+weight/half-life table in `constants.ts` (1.2 @ 120d and 0.8 @ 90d — the
 highest-weighted signal in the model), and `scripts/backfill-interest-events.ts`.
 
-Writing the prompt's slugs would produce rows whose `source` matches no entry in
-`INTEREST_SOURCES`, so they would fold in at **zero weight**: the single most
-predictive signal in the system, silently contributing nothing.
+**Why this matters more than a naming preference.** A row written with a source
+slug that has no entry in the weight table folds in at **zero weight**. Nothing
+errors. The rows exist, the counts look right, and the single most predictive
+signal in the system contributes nothing. There is no symptom to notice — which
+is why this is pinned three ways rather than agreed once:
 
-**Resolution:** this build keeps `checkin_yes` / `checkin_no` on the wire, and
-routes every write through `CONSTANTS.checkin.interestSource`, which is a
-two-entry map. If the framework document really does specify the other names,
-renaming is one edit there plus a widened check constraint — and the weights
-come with it.
+| where | mechanism | catches |
+|---|---|---|
+| `constants.ts` | `satisfies Record<'positive' \| 'negative', InterestSource>` | a slug outside the union — **at compile time** |
+| `tests/checkin.test.ts` | asserts both slugs have a weight-table entry with weight > 0 | a widened union with no matching table entry |
+| this document | says which names are canonical | the next person who reads the framework doc |
+
+### The drift, and its root cause
+
+`tandem-matching-v2-framework.md` §1.2 specifies `checkin_positive` /
+`checkin_negative`. That document has been re-read at the start of each build,
+and the wrong names have been reintroduced and re-rejected **three builds
+running** (v1.7, v1.9, v1.9.1). The repo is not where the problem is; the
+document is.
+
+**Outstanding, and not done here: correct §1.2 of the framework document**, and
+add a line under its table reading *canonical slugs are `checkin_yes` /
+`checkin_no`; see `SCHEMA.md` §6.* That file is not present in this repository or
+anywhere on the machine this was built on, so it could not be edited. Until it
+is, the guards above are what stop the drift reaching the database — but they
+stop it *late*, once per build, which is why the document still needs fixing.
+
+**If the framework document is ever declared authoritative instead:** every write
+routes through `CONSTANTS.checkin.interestSource`, so renaming is one edit there
+plus a widened check constraint, and the weights come with it. That is a
+deliberate decision to make, not a default to drift into.
 
 ---
 

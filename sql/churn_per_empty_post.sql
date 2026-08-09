@@ -33,11 +33,13 @@
 --                  `created_at` later than P's start time. "They saw how it
 --                  went and never posted again."
 --
---   CENSORING      posts that started within the last :censor_days are EXCLUDED
+--   CENSORING      posts that started within the last N days are EXCLUDED
 --                  entirely. A host whose post went empty five days ago has not
 --                  had time to post again, and counting them as churned would
 --                  badly overstate the effect. This is the single most important
---                  line in the file.
+--                  line in the file — and because N is a judgement call, every
+--                  query below reports more than one value of it rather than
+--                  picking one.
 --
 -- -----------------------------------------------------------------------------
 -- READ THE COUNTS, NOT THE RATES
@@ -54,27 +56,46 @@
 -- =============================================================================
 
 
--- The censoring window, in days. Change it here and nowhere else.
+-- -----------------------------------------------------------------------------
+-- THE CENSORING WINDOW IS REPORTED, NOT CHOSEN
 --
--- 14 is the shortest defensible value. Hosts post roughly every 5-6 days when
--- they are active, so 14 days is about two-and-a-half expected posts of
--- patience. If the headline moves a lot between 14 and 45 (query 3), the number
--- is measuring the window rather than the behaviour and none of it should be
--- used.
-\set censor_days 14
+-- v1.9 pinned one window and reported one number. That hid the thing most worth
+-- knowing at this sample size: how much the answer depends on the window.
+--
+-- Query 1 therefore reports BOTH ARMS AT BOTH 14 AND 30 DAYS, side by side.
+-- 14 is the shortest defensible value — hosts post roughly every 5-6 days when
+-- active, so it is about two-and-a-half expected posts of patience. 30 is long
+-- enough that a host who was ever coming back has.
+--
+-- If the point estimate moves materially between the two, the number is
+-- measuring the WINDOW rather than the BEHAVIOUR, and it is not stable enough to
+-- move `demandWeight` — which stays at 0.10 until the sample grows. See "HOW TO
+-- READ THIS" at the bottom, case D.
+--
+-- NOTE: no psql backslash commands and no `:variables` anywhere in this file.
+-- The Supabase SQL editor is not psql and silently does not support them. To
+-- change the windows, edit the `values` list in each query.
+-- -----------------------------------------------------------------------------
 
 
 -- -----------------------------------------------------------------------------
--- 1. THE HEADLINE
+-- 1. THE HEADLINE, AT BOTH WINDOWS
 -- -----------------------------------------------------------------------------
--- Three rows: empty, filled, and the difference between them.
+-- Five rows per window: empty, filled, and the difference between them.
 
-with judged as (
-  -- Every post old enough to have an outcome we can trust.
+with windows as (
+  select * from (values (14), (30)) as w(days)
+),
+judged as (
+  -- Every post old enough to have an outcome we can trust, at each window. A
+  -- post appears once per window it qualifies for, so the 14-day rows are a
+  -- superset of the 30-day rows and the two are NOT independent samples. That is
+  -- fine for a sensitivity check and would not be fine for a test of difference
+  -- between windows — which is why none is computed.
   select
+    w.days,
     a.id,
     a.host_id,
-    a.starts_at,
     coalesce(a.confirmed_joiners, 0) = 0 as was_empty,
     not exists (
       select 1
@@ -82,102 +103,122 @@ with judged as (
        where later.host_id = a.host_id
          and later.created_at > a.starts_at
     ) as churned
-  from public.activities a
-  where a.starts_at < now() - make_interval(days => :censor_days)
+  from windows w
+  join public.activities a
+    on a.starts_at < now() - make_interval(days => w.days)
 ),
 grouped as (
   select
+    days,
     was_empty,
-    count(*)                            as hosts,
+    count(*)                            as posts,
     count(*) filter (where churned)     as churned
   from judged
-  group by was_empty
+  group by days, was_empty
 ),
 -- Wilson score interval at 95%. Used rather than the textbook normal interval
 -- because at these counts the normal one produces bounds outside [0, 1] and is
 -- simply wrong; Wilson stays honest down to single digits.
 wilson as (
   select
+    days,
     was_empty,
-    hosts,
+    posts,
     churned,
-    (churned::numeric / nullif(hosts, 0))                                as p,
-    ((churned::numeric / hosts) + 1.96^2 / (2 * hosts)
-      - 1.96 * sqrt(((churned::numeric / hosts) * (1 - churned::numeric / hosts)
-                     + 1.96^2 / (4 * hosts)) / hosts)
-    ) / (1 + 1.96^2 / hosts)                                             as lo,
-    ((churned::numeric / hosts) + 1.96^2 / (2 * hosts)
-      + 1.96 * sqrt(((churned::numeric / hosts) * (1 - churned::numeric / hosts)
-                     + 1.96^2 / (4 * hosts)) / hosts)
-    ) / (1 + 1.96^2 / hosts)                                             as hi
+    (churned::numeric / nullif(posts, 0))                                as p,
+    ((churned::numeric / posts) + 1.96^2 / (2 * posts)
+      - 1.96 * sqrt(((churned::numeric / posts) * (1 - churned::numeric / posts)
+                     + 1.96^2 / (4 * posts)) / posts)
+    ) / (1 + 1.96^2 / posts)                                             as lo,
+    ((churned::numeric / posts) + 1.96^2 / (2 * posts)
+      + 1.96 * sqrt(((churned::numeric / posts) * (1 - churned::numeric / posts)
+                     + 1.96^2 / (4 * posts)) / posts)
+    ) / (1 + 1.96^2 / posts)                                             as hi
   from grouped
-  where hosts > 0
+  where posts > 0
+),
+diffs as (
+  -- The difference, which is the actual quantity of interest. Its interval is
+  -- the independent-samples normal interval on the difference of two
+  -- proportions — adequate here because the CONCLUSION is almost always going to
+  -- be "this interval is far too wide to act on", and a wider-but-simpler
+  -- interval cannot make that conclusion wrong.
+  select
+    w.days,
+    e.p - f.p                                                          as d,
+    (e.p - f.p) - 1.96 * sqrt(coalesce(e.p * (1 - e.p) / e.posts, 0)
+                            + coalesce(f.p * (1 - f.p) / f.posts, 0))   as lo,
+    (e.p - f.p) + 1.96 * sqrt(coalesce(e.p * (1 - e.p) / e.posts, 0)
+                            + coalesce(f.p * (1 - f.p) / f.posts, 0))   as hi,
+    coalesce(e.posts, 0) + coalesce(f.posts, 0)                         as posts
+  from windows w
+  left join wilson e on e.days = w.days and e.was_empty
+  left join wilson f on f.days = w.days and not f.was_empty
 )
 select
+  days                                     as censor_days,
   case when was_empty then '1. after an EMPTY post' else '2. after a FILLED post' end as cohort,
-  hosts                                    as n_posts,
+  posts                                    as n_posts,
   churned                                  as n_churned,
-  round(p, 3)                              as churn_rate,
+  round(p, 3)                              as rate,
   round(lo, 3)                             as ci_low,
   round(hi, 3)                             as ci_high,
-  churned || ' of ' || hosts               as raw
+  churned || ' of ' || posts               as raw
   from wilson
 
 union all
 
--- The difference, which is the actual quantity of interest. Its interval is the
--- independent-samples normal interval on the difference of two proportions —
--- adequate here because the CONCLUSION is almost always going to be "this
--- interval is far too wide to act on", and a wider-but-simpler interval cannot
--- make that conclusion wrong.
 select
+  days                                     as censor_days,
   '3. DIFFERENCE (empty - filled)'         as cohort,
-  (select sum(hosts) from wilson)          as n_posts,
+  posts                                    as n_posts,
   null                                     as n_churned,
-  round(
-    (select p from wilson where was_empty) -
-    (select p from wilson where not was_empty), 3)   as churn_rate,
-  round(
-    ((select p from wilson where was_empty) -
-     (select p from wilson where not was_empty))
-    - 1.96 * sqrt(
-        coalesce((select p*(1-p)/hosts from wilson where was_empty), 0) +
-        coalesce((select p*(1-p)/hosts from wilson where not was_empty), 0)
-      ), 3)                                          as ci_low,
-  round(
-    ((select p from wilson where was_empty) -
-     (select p from wilson where not was_empty))
-    + 1.96 * sqrt(
-        coalesce((select p*(1-p)/hosts from wilson where was_empty), 0) +
-        coalesce((select p*(1-p)/hosts from wilson where not was_empty), 0)
-      ), 3)                                          as ci_high,
-  'see rows 1 and 2'                                 as raw;
+  round(d, 3)                              as rate,
+  round(lo, 3)                             as ci_low,
+  round(hi, 3)                             as ci_high,
+  'see rows 1 and 2'                       as raw
+  from diffs
+
+ order by censor_days, cohort;
 
 
 -- -----------------------------------------------------------------------------
 -- 2. HOW MUCH DATA IS THERE, REALLY
 -- -----------------------------------------------------------------------------
--- Run this first if row 1 looks surprising. It is very easy to compute a
+-- Run this first if query 1 looks surprising. It is very easy to compute a
 -- confident-looking rate over four posts.
+--
+-- `judgeable` is the number that decides whether ANY of this is actionable. If
+-- it is under ~30 at both windows, nothing below follows from the data.
 
+with windows as (select * from (values (14), (30)) as w(days))
 select
-  count(*)                                                        as activities_total,
-  count(*) filter (where starts_at < now())                       as started,
-  count(*) filter (where starts_at < now() - make_interval(days => :censor_days))
-                                                                  as judgeable,
-  count(*) filter (where starts_at < now() - make_interval(days => :censor_days)
-                     and coalesce(confirmed_joiners, 0) = 0)      as judgeable_empty,
-  count(distinct host_id)                                         as distinct_hosts
-  from public.activities;
+  w.days                                                          as censor_days,
+  (select count(*) from public.activities)                        as activities_total,
+  (select count(*) from public.activities where starts_at < now()) as started,
+  count(a.*)                                                      as judgeable,
+  count(a.*) filter (where coalesce(a.confirmed_joiners, 0) = 0)   as judgeable_empty,
+  count(distinct a.host_id)                                       as judgeable_hosts
+  from windows w
+  left join public.activities a
+    on a.starts_at < now() - make_interval(days => w.days)
+ group by w.days
+ order by w.days;
 
 
 -- -----------------------------------------------------------------------------
 -- 3. IS THE ANSWER AN ARTIFACT OF THE WINDOW?
 -- -----------------------------------------------------------------------------
--- The empty-post churn rate at five different censoring windows. It should drift
--- DOWNWARD as the window widens (more time to come back). A sharp jump, or no
--- movement at all, means something is wrong with the definition rather than
--- interesting about hosts.
+-- The empty-post churn rate at five censoring windows: query 1's 14-vs-30
+-- comparison extended far enough to see the SHAPE of the drift rather than just
+-- its sign.
+--
+-- It should drift DOWNWARD as the window widens (more time to come back). A
+-- sharp jump, or no movement at all, means something is wrong with the
+-- definition rather than interesting about hosts.
+--
+-- Empty arm only, deliberately: this is a diagnostic on the definition, not an
+-- estimate of the effect. Query 1 is where both arms are compared.
 
 with windows as (select * from (values (7), (14), (21), (30), (45)) as w(days))
 select
@@ -205,10 +246,33 @@ select
 
 
 -- =============================================================================
--- HOW TO READ ROW 3 — the only part that decides anything
+-- HOW TO READ THIS — the only part that decides anything
 --
--- Look at `ci_low` and `ci_high` on the DIFFERENCE row. Three cases, and the
+-- Look at `ci_low` and `ci_high` on the DIFFERENCE rows. Four cases, and the
 -- action is different in each.
+--
+-- CHECK CASE D FIRST. It is a gate on the other three: if the estimate is not
+-- stable across the two windows, A/B/C are being read off a number that does
+-- not exist yet, and the interval they are read from is not the real one.
+--
+--
+-- CASE D — the two windows DISAGREE                    <-- check this first
+--   e.g. difference 0.31 at 14 days, 0.09 at 30 days
+--
+--   The estimate is measuring the CENSORING WINDOW, not host behaviour. Some
+--   downward drift is expected and fine — a wider window gives hosts more time
+--   to come back, so the 30-day rate should be a little lower. What matters is
+--   whether the two are close enough that the choice of window does not change
+--   the decision.
+--
+--   Concretely: if the 14-day and 30-day differences fall in different cases
+--   below, or if one point estimate sits outside the other's interval, the
+--   number is not stable enough to move a constant.
+--
+--   ACTION: `demandWeight` stays at 0.10. Do not pick the window that gives the
+--   more interesting answer — that is the whole failure mode this comparison
+--   exists to prevent. Re-run at ~100 judgeable posts and check D again before
+--   reading anything else.
 --
 --
 -- CASE A — the interval EXCLUDES 0.18, and sits BELOW it
@@ -227,6 +291,10 @@ select
 --   under-weighted and the simulator was being conservative.
 --   ACTION: raising `demandWeight` is now supported by data rather than by a
 --   guess. Raise it in one step, not to 0.5, and re-run this query after.
+--   REQUIRES CASE D TO PASS. This is the only case that moves a constant, so it
+--   is the only one where window instability actually costs anything — and it is
+--   also the one whose conclusion is most flattering to the existing model,
+--   which is exactly when to be strictest about the gate.
 --
 --
 -- CASE C — the interval CONTAINS 0.18   <-- the likely answer today
@@ -256,4 +324,8 @@ select
 --   * A p-value. Not computed, on purpose.
 --   * A change to any scoring constant other than `demandWeight`.
 --   * Anything at all, if `judgeable` in query 2 is under ~30.
+--   * Anything at all, if the two windows disagree (case D).
+--   * A comparison BETWEEN the windows treated as evidence. The 14-day and
+--     30-day sets overlap almost entirely — the same posts, judged twice — so
+--     they are not two samples and their difference is not an effect.
 -- =============================================================================

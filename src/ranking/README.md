@@ -350,18 +350,31 @@ answer is never shown to the rated user, and it never becomes a score.
 - **who** — exactly one counterpart, because `tandems` is strictly pairwise.
 - **how many** — one per app open. Five on launch is an interrogation, and the
   second answer is already worse than the first.
-- **order** — oldest first. A check-in decays in usefulness, and asking the
-  stalest one first is what stops a backlog quietly becoming permanent.
-- **skip** — writes nothing, so it returns next time. A person who did not
-  answer is not a person who said no; storing a skip as a negative teaches
-  people that the honest answer has consequences, after which the signal is
-  worthless.
+- **until when** — `eligibilityWindowDays` (7), from the activity's end. Past
+  that it is dropped, not queued. Recall on a three-week-old tandem is poor, and
+  a label answered from a vague memory is worse than no label, because nothing
+  downstream can tell the two apart.
+- **order** — **most recent first** (reversed in v1.9). A check-in decays in
+  usefulness, and with one prompt per app open only one property is available:
+  queue fairness or answer quality. Answer quality wins. The starvation risk that
+  argued for oldest-first is gone anyway — with the window above, nothing can sit
+  in the queue long enough to be starved.
+- **skip** — **soft** (v1.9.1). A first skip sets `retry_after` and the prompt
+  returns once more after `skipRetryDays` (5); a second retires it permanently.
+  One dismissal is ambiguous — a mis-tap, a bad moment — and labels are the
+  scarcest resource here, so one should not cost one permanently. Two is an
+  answer.
+
+  A skip is **never** a negative: its own table, no `rated_id`, no polarity, no
+  `interest_events` row. A person who did not answer is not a person who said no,
+  and storing it as one teaches people that the honest answer has consequences,
+  after which the signal is worthless.
 
 Writes `tandem_feedback` (already per-pair — no migration needed) and mirrors
 into `interest_events`, where `checkin_yes` carries weight 1.2 at a 120-day
-half-life, the highest and longest in the table. See **SCHEMA.md §6** for the
-`checkin_yes` vs `checkin_positive` naming conflict and why the existing slugs
-were kept.
+half-life, the highest and longest in the table. **`checkin_yes` / `checkin_no`
+are canonical — see SCHEMA.md §6**, which is the authority and explains why a
+wrong slug fails silently at zero weight rather than erroring.
 
 ## Density adaptation (v1.6) — COLLAPSED IN v1.8 §2
 

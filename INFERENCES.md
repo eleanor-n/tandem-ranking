@@ -442,6 +442,16 @@ overrides the v1.5/v1.6 migrations wherever they disagree.
 
 ### H1. The check-in interest source keeps its v1.5 slugs
 
+> **v1.9.1 UPDATE.** `SCHEMA.md` §6 is now the AUTHORITY on this, and states the
+> canonical slugs as a rule rather than as the resolution of a conflict. The
+> guard is also no longer only a test: `constants.ts` pins it at compile time
+> with `satisfies Record<'positive' | 'negative', InterestSource>`.
+>
+> The framework document is now named as the root cause. Its §1.2 has
+> reintroduced the wrong slugs in three consecutive builds because it is re-read
+> at the start of each one. **Correcting it is outstanding and was not done
+> here** — the file is not in this repository. See SCHEMA.md §6.
+
 The build prompt says to mirror check-ins into `interest_events` as
 `checkin_positive` / `checkin_negative`. This repo has used `checkin_yes` /
 `checkin_no` since v1.5, and those slugs key three things: the
@@ -567,3 +577,58 @@ posts through supply response, so **the best-performing configurations were the
 slowest to measure.** Two ablations had already been abandoned for time before
 the fix. A harness whose cost correlates with the result is a harness that
 selects which results get collected.
+
+### H10. The check-in queue is bounded, and the skip is soft (v1.9.1 §2, §3)
+
+Two corrections to v1.9, both in the same direction: **v1.9 spent labels too
+freely, and `tandem_feedback` is the scarcest resource in the system.** It is the
+only source of pairwise compatibility data anywhere, it had zero rows when this
+was written, and every future version of the ranker depends on it.
+
+**The queue is bounded.** `eligibilityWindowDays = 7`, measured from the
+activity's end. Past it a check-in is dropped rather than queued.
+
+This looks like it spends labels rather than saving them, and it does — on
+purpose. Recall on a three-week-old tandem is poor, so those answers are noise,
+and noise is strictly worse than absence here because nothing downstream can
+distinguish a guessed answer from a remembered one. A model fitted on a mixture
+of the two is worse than one fitted on half the rows.
+
+It also dissolves a tradeoff rather than settling it. v1.9 reversed the ordering
+to most-recent-first and documented a real cost: with one prompt per app open, an
+old check-in could be starved indefinitely by fresher arrivals. That cost was
+entirely a property of an unbounded queue. Bounded, there is nothing to starve —
+the check-in that would have waited forever is simply gone, which is what should
+have happened to it anyway. Worth recording as its own kind of result: the
+argument was about ordering and the answer was not an ordering.
+
+**The skip is soft.** A first skip sets `retry_after = now + skipRetryDays (5)`;
+a second sets it to `null`, permanently. v1.9's hard suppression was specified in
+error, and the error was one-directional: one accidental dismissal cost one label
+forever, with no way to notice and no way to recover it.
+
+The asymmetry is the whole design. One dismissal is ambiguous — a mis-tap, a bad
+moment, someone mid-something-else. Two is an answer, and asking past it reads as
+the app not listening. The escalation lives in `core/checkin.ts` (`nextSkipRetry`)
+rather than in SQL so it is testable without a database and cannot differ between
+adapters.
+
+Every degradation path was chosen to fail toward re-asking: `loadSkippedCheckIns`
+returns `[]` on error, so a failed read makes a second skip look like a first and
+the prompt returns once more. An extra prompt is an annoyance; a lost label is
+permanent.
+
+What did NOT change, across all three versions: a skip is not a negative. Its own
+table, no `rated_id`, no polarity, no `interest_events` row.
+
+Two things this surfaced that were not in the specification:
+
+- **`retry_after` must be written explicitly as SQL `NULL`, not omitted.** The
+  second skip is an UPDATE onto an existing row; omitting the column would leave
+  the first skip's retry in place and the check-in would return a third time —
+  the exact behaviour retirement exists to prevent. Pinned by a test.
+- **`checkin_skips` needs an UPDATE row-level-security policy.** v1.9 shipped
+  INSERT and SELECT only, which was sufficient when a skip was write-once. Under
+  RLS the second skip's upsert would have been silently rejected, and the visible
+  symptom — a dismissed prompt that keeps coming back — looks like a UI bug and
+  is not one.

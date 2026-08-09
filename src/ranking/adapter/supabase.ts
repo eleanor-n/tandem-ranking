@@ -147,6 +147,12 @@ export const COLUMNS = {
     tandemId: 'tandem_id',
     raterId: 'rater_id',
     createdAt: 'created_at',
+    /**
+     * Nullable (v1.9.1 §3). When the check-in may be asked once more; SQL NULL
+     * means never again. Read as `null`, never as `undefined` — see the mapping
+     * in `loadSkippedCheckIns`.
+     */
+    retryAfter: 'retry_after',
   },
   interestEvents: { table: 'interest_events' },
   /**
@@ -174,6 +180,22 @@ export function toEpoch(v: unknown): Epoch {
   if (typeof v !== 'string') return 0;
   const parsed = Date.parse(v);
   return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/**
+ * Nullable timestamptz -> epoch ms, preserving SQL NULL as `null`.
+ *
+ * Separate from `toEpoch` because for `checkin_skips.retry_after` the two
+ * results mean opposite things: `null` is "retired, never ask again", `0` is
+ * "askable since 1970", i.e. ask now. Folding NULL into 0 the way `toEpoch`
+ * folds everything else would silently un-retire every retired skip.
+ *
+ * A row can only reach here having come back from the database, and if the
+ * column did not exist the query errors and no rows come back at all — so
+ * `undefined` is not a case this has to disambiguate.
+ */
+export function epochOrNull(v: unknown): Epoch | null {
+  return v === null || v === undefined ? null : toEpoch(v);
 }
 
 /** epoch ms -> ISO string for writing. Uses Date only at the I/O boundary. */
@@ -812,12 +834,18 @@ export function createSupabaseRankingPort(
       try {
         const res = await client
           .from(s.table)
-          .select(`${s.tandemId},${s.raterId}`)
+          .select(`${s.tandemId},${s.raterId},${s.retryAfter}`)
           .eq(s.raterId, userId);
         const rows = ((res as unknown as { data: Row[] | null }).data) ?? [];
         return rows.map((row) => ({
           tandemId: str(row[s.tandemId]),
           raterId: str(row[s.raterId]),
+          // SQL NULL and a missing column both land here as null, which is the
+          // permanent-retirement value. That collision is safe ONLY because the
+          // column ships in the same migration as the table, so no row can
+          // predate it. If the column ever has to be re-added, backfill it
+          // rather than letting old rows read as "never ask again".
+          retryAfter: epochOrNull(row[s.retryAfter]),
         }));
       } catch (error) {
         // Degrade to "nothing was skipped", which RE-ASKS rather than never
@@ -838,10 +866,16 @@ export function createSupabaseRankingPort(
         // NOTE what is absent: no rated_id, no polarity, no interest_events
         // mirror. A skip is not a negative and the write path has nowhere to
         // put one even by accident.
+        //
+        // `retryAfter` is decided in core (`nextSkipRetry`) and merely persisted
+        // here, so the second-skip escalation cannot drift between adapters.
+        // Writing it explicitly on every upsert matters: on the second skip the
+        // row already exists and this is the UPDATE that retires it.
         const { error } = await client.from(s.table).upsert({
           [s.tandemId]: skip.tandemId,
           [s.raterId]: skip.raterId,
           [s.createdAt]: toIso(skip.createdAt),
+          [s.retryAfter]: skip.retryAfter === null ? null : toIso(skip.retryAfter),
         }, { onConflict: `${s.tandemId},${s.raterId}` });
         if (error) fail('writeCheckInSkip', error);
       } catch (error) {

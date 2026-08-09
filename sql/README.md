@@ -36,9 +36,20 @@ to guess where you are.
 
 **What it will say today.** Almost certainly "not enough data" — the confidence
 intervals will overlap. That is a real answer, not a failed run. The file's
-closing comment spells out the four cases and what to do in each; the short
-version is that only Case B (empty posts cost *more* than modelled) justifies
-raising `demandWeight`, and Case C — the likely one — means change nothing.
+closing comment spells out the cases and what to do in each; the short version is
+that only Case B (empty posts cost *more* than modelled) justifies raising
+`demandWeight`, and Case C — the likely one — means change nothing.
+
+**Both censoring windows, side by side.** Query 1 reports both arms at **14 and
+30 days** rather than picking one. At this sample size the estimate's sensitivity
+to that choice is itself the finding: if the two windows disagree, the number is
+measuring the window rather than host behaviour, and it is not stable enough to
+move a constant no matter how wide or narrow either interval is. That is **Case
+D**, and it gates the other three — read it first.
+
+The obvious failure mode here is picking the window that gives the more
+interesting answer. Reporting both in one result set is the cheapest defence
+against it, which is why the window is no longer a variable to set.
 
 **What could change as a result.**
 

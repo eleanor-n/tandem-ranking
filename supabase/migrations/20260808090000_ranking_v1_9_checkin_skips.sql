@@ -44,6 +44,25 @@
 -- and the prompt returned next session. v1.9 §3 specifies that a skip is
 -- remembered. Both are defensible; the v1.7 rationale is preserved in
 -- `core/checkin.ts` next to the code that now implements the other one.
+--
+-- -----------------------------------------------------------------------------
+-- THE SKIP IS SOFT (v1.9.1 §3)
+--
+-- v1.9 suppressed a skipped check-in permanently. That was specified in error
+-- and is corrected here by `retry_after`.
+--
+-- Labels are the scarcest resource in this system: `tandem_feedback` is the only
+-- source of pairwise compatibility data anywhere, and under hard suppression one
+-- accidental dismissal cost one label permanently. A single dismissal is
+-- ambiguous — a mis-tap, a bad moment, someone mid-something-else. Two is an
+-- answer.
+--
+--   first skip   retry_after = now() + checkin.skipRetryDays   (asked once more)
+--   second skip  retry_after = null                            (never again)
+--
+-- The escalation is decided in `core/checkin.ts` (`nextSkipRetry`), not here.
+-- Keeping it out of SQL means it is testable without a database and cannot
+-- differ between adapters; this schema only has to be able to hold the answer.
 -- =============================================================================
 
 
@@ -55,15 +74,33 @@ create table if not exists public.checkin_skips (
   tandem_id   uuid        not null,
   rater_id    uuid        not null,
   created_at  timestamptz not null default now(),
+  -- Nullable, and the two states are NOT interchangeable:
+  --   a timestamp -> askable once more after it passes
+  --   null        -> retired, never ask again
+  retry_after timestamptz,
   primary key (tandem_id, rater_id)
 );
+
+-- Idempotent for a database where v1.9 was applied before v1.9.1 existed. The
+-- column is nullable with no default, so on a table that already has rows this
+-- backfills them as null — which reads as "retired". That is the correct
+-- reading: those rows WERE written under hard suppression, and turning them into
+-- retries would re-ask check-ins whose owners were told they were done.
+alter table public.checkin_skips
+  add column if not exists retry_after timestamptz;
 
 comment on table public.checkin_skips is
   'One row per (tandem, rater) the user declined to answer. NOT a negative '
   'rating: no rated_id, no polarity, never mirrored into interest_events, and '
   'never counted in tandem_feedback. See v1.9 migration header.';
 
--- The primary key IS the idempotency guarantee: skipping twice is one row.
+comment on column public.checkin_skips.retry_after is
+  'When this check-in may be asked once more. NULL means never again (set on '
+  'the second skip). A skip is soft: one dismissal buys a delay, not a '
+  'deletion. See v1.9.1 section 3.';
+
+-- The primary key IS the idempotency guarantee: skipping twice is one row —
+-- and on the second skip that row is UPDATED to retire it.
 
 -- Lookup path is "everything this user skipped", which the PK's leading column
 -- does not serve.
@@ -100,6 +137,22 @@ begin
     create policy checkin_skips_own_select on public.checkin_skips
       for select to authenticated
       using (auth.uid() = rater_id);
+  end if;
+
+  -- REQUIRED BY v1.9.1, not optional. The second skip is an UPSERT onto a row
+  -- that already exists, so Postgres performs an UPDATE — and with only INSERT
+  -- and SELECT policies, RLS rejects it. The visible symptom would be that
+  -- retiring a check-in silently fails and the prompt keeps coming back, which
+  -- looks like a UI bug and is not one.
+  if not exists (
+    select 1 from pg_policies
+     where schemaname = 'public' and tablename = 'checkin_skips'
+       and policyname = 'checkin_skips_own_update'
+  ) then
+    create policy checkin_skips_own_update on public.checkin_skips
+      for update to authenticated
+      using (auth.uid() = rater_id)
+      with check (auth.uid() = rater_id);
   end if;
 end $$;
 
@@ -139,6 +192,17 @@ create unique index if not exists tandem_feedback_one_per_rater_idx
 --   'checkin_skips_rater_idx',
 --   'tandem_feedback_one_per_rater_idx'
 -- ]) as name;
+--
+-- The soft-skip column and the UPDATE policy the second skip depends on:
+--
+-- select column_name, is_nullable
+--   from information_schema.columns
+--  where table_schema = 'public' and table_name = 'checkin_skips'
+--    and column_name = 'retry_after';
+--
+-- select policyname, cmd from pg_policies
+--  where schemaname = 'public' and tablename = 'checkin_skips';
+-- -- expect three rows, one of them cmd = 'UPDATE'.
 --
 -- If §3 failed, these are the duplicates blocking it:
 --
