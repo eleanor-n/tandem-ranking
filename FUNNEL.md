@@ -225,6 +225,33 @@ quantity and a viewer-dependent one is pairwise.
 > would be a new functional form with no measurement behind it, introduced
 > under an abort. Whether the un-clipped form beats this one is **UNMEASURED**
 > and is §8's first item.
+>
+> ### ⚠️ v1.9.1 — sharper again. It is not "clipped on the upside", it is a no-op.
+>
+> The column audit (`scripts/deadcolumns.ts`, DIAGNOSTICS §G0.4) logged every
+> feature over 3 seeds × 300 users × 60 days and found `acceptLikelihood`
+> **identically 1.0 on every single impression.** Not mostly, not above
+> neutral — every one.
+>
+> So under the shipped constants P_accept is not a damped term or a
+> downside-only term. It is a **multiplication by 1**: it contributes nothing
+> to the ordering and logs a column of 1s into the training set. Each pass has
+> made this finding worse — the term "survives at ρ=0" (wrong), then "works
+> only downward" (v1.9, right but weaker than the truth), now "does not work at
+> all in this population".
+>
+> **Still not deleted**, and the reason is the one that matters: it is constant
+> because every viewer deviation in the *simulated* population is non-negative,
+> not because the algebra forces it. `clamp01(1 × (1 + pickiness × deviation))`
+> is genuinely below 1 for a below-average-reputation viewer, and production
+> will have those. Deleting on this evidence would be deleting a live term on a
+> simulator artifact — §D4, §E5 and §F1 are three recorded instances of exactly
+> that error, and the fact that deletion would have been the convenient outcome
+> here is the reason to refuse it.
+>
+> What this *does* settle: it raises §8's first item from "worth measuring" to
+> the single highest-value experiment on the list, because the term is
+> currently contributing nothing at all.
 
 **Acted on as of v1.9.** `hostAcceptDamping` is now `0`. This is not tuning: it
 is the pre-committed response to a pre-registered criterion that fired at

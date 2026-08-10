@@ -954,3 +954,258 @@ does not depend on ρ at all — its funnel is off. Its margin over `shipped` is
 3.11× on retention and 9.34× on Gini. The reason it is still not being adopted
 has nothing to do with separation and everything to do with `churnPerEmptyPost`;
 see FUNNEL.md §7.
+
+---
+
+## G0 — The simplification audit: an outside replication, and what it eliminated
+
+Prompted by an independent test from outside this project reporting that
+**nearest-first still beats the full ranker everywhere, and tuning only closes
+part of the gap.** That is the strongest evidence class this repo has: the
+simulator was authored alongside the ranker it evaluates, so a result AGAINST
+the ranker from someone who did not write either is worth more than anything
+generated in here.
+
+It replicated. It also turned out to be a statement about the metric.
+
+### G0.1 — The complexity ladder, 12 seeds, gated
+
+```bash
+npx tsx scripts/sweep.ts --sizes 40,150,600 --seeds 1,2,3,4,5,6,7,8,9,10,11,12
+```
+
+N=600, the only size where host retention separates at all:
+
+| arm | host retention | repeat rate | zero-joiner | hosts alive | Gini |
+|---|---:|---:|---:|---:|---:|
+| shipped | **0.958** ±0.002 | 0.518 | 9.2% | 58.9% | **0.414** |
+| ranker_no_funnel | 0.948 ±0.003 | 0.372 | 9.8% | 58.9% | 0.428 |
+| ranker_repaired | 0.940 ±0.003 | 0.382 | 12.9% | 52.9% | 0.463 |
+| proximity_only | 0.935 ±0.003 | **0.657** | 20.0% | 41.3% | 0.535 |
+| random | 0.862 ±0.003 | 0.053 | 43.0% | 22.6% | 0.645 |
+
+**Both claims are true at once, and they are about different metrics.**
+
+On **repeat rate** nearest-first wins everywhere, by 72% at N=600 — the outside
+result, reproduced. On **host retention** it comes fourth.
+
+The mechanism is legible in `proximity_only`'s own row rather than inferred:
+it produces the MOST tandems per user (21.3) and the HIGHEST repeat rate while
+leaving TWICE as many posts with nobody (20.0% vs 9.2%) and keeping a third
+fewer hosts alive (41.3% vs 58.9%). Repeat rate is a ratio and can be won by
+shrinking its denominator; `proximity_only` shrinks the pool by construction,
+which `sweep.ts` has warned about since v1.7 and which this is the first direct
+measurement of. Host retention is a count and cannot be won that way.
+
+So: nearest-first makes the people it serves tandem more, and serves fewer
+people.
+
+### G0.2 — Simplification helps, with an interior optimum already occupied
+
+Reading the ladder as a complexity ladder (N=600):
+
+```
+ranker_repaired    0.940 / Gini 0.463    full ranker
+ranker_no_funnel   0.948 / Gini 0.428    - the funnel        -> better
+shipped            0.958 / Gini 0.414    - the interest model -> BEST
+proximity_only     0.935 / Gini 0.535    - demand + penalties -> worse
+```
+
+Non-monotone. Removal helps up to `shipped` and reverses hard past it. What is
+not earning its place is the interest model and the funnel; what IS earning its
+place is the demand layer and the session penalties — precisely the machinery
+`proximity_only` discards. **The optimum is the configuration already shipping**,
+which is a confirmation and not a change.
+
+**Caveat that governs everything above:** at N=40 host retention is a 5-way tie
+and at N=150 a 4-way tie, both `NOT IDENTIFIED`. The beta is ~40 users. At that
+size this experiment supports nothing about retention and Gini is the only
+metric that discriminates.
+
+### G0.3 — Distance is not overweighted. If anything it is UNDER-weighted.
+
+```bash
+npx tsx scripts/sweep.ts --proximity-sweep --sizes 150,600 --seeds 1,2,3,4,5,6
+```
+
+**This section originally said "flat, no optimum". That was written off the
+first two-thirds of the sweep output and it was wrong.** Recorded rather than
+silently corrected, because reading a partial sweep and calling it flat is the
+same class of error as §D4's three-seed optimum — the difference is only that
+this one was caught before it reached a decision.
+
+The gated verdict on the full range:
+
+```
+N=150: optimum w_proximity 0.70 (0.867, 0.071 above median, noise +/-0.026)
+N=600: optimum w_proximity 0.65 (0.845, 0.042 above median, noise +/-0.015)
+       repeat rate rises at 14/14 steps at N=600 (0.332 -> 0.516)
+```
+
+Both optima clear the 2 SE gate. Both are roughly **3× the shipped 0.20**, and
+repeat rate is still rising at 0.80, the top of the swept range — the same
+open-ended result §D4 got.
+
+So the direction of the error, if there is one, is that proximity is **too
+low**, not too high. That is also the direction the externally supplied
+constants file moved it (0.20 → 0.50/0.55), which makes that file's author
+right about the sign even though the file itself is unusable for other reasons.
+
+**Three things stop this from being a conclusion.**
+
+1. **It is the wrong metric.** `--proximity-sweep` reports
+   `retentionAfterEmpty` and `repeatRate`. It has never reported host
+   retention, which is the primary metric — the §F0 gap, still open, and it is
+   load-bearing here rather than cosmetic. §G0.5 runs the primary metric
+   directly.
+2. **Repeat rate is the metric nearest-first wins by construction** (§G0.1), so
+   "more proximity raises repeat rate" is close to a restatement of that, not
+   independent support.
+3. **§D4 found different optima from the same seeds.** At six seeds it named
+   0.10 at N=150 and 0.30 at N=600; this run names 0.70 and 0.65. The runs are
+   not comparable — §D4 predates the ρ and `repeatableContext` aborts — but an
+   "optimum" that relocates by 0.6 when two unrelated constants change is not
+   behaving like an optimum.
+
+Independently of all of it: **in what ships, `w_proximity` does nothing at all.**
+`RANKER_ENABLED` is false, so `pJoin` is collapsed to a delta on proximity and
+the deck is proximity × demand × session penalties. This sweep is a finding
+about the shelved ranker and a note for whoever turns it on — not a live
+mis-weighting.
+
+### G0.4 — What the elimination actually eliminated
+
+The obvious simplification is to delete the shelved ranker. **It was not done,
+and the reason is architectural rather than cautious.** `shipping.ts` computes
+and logs the full shelved feature set on every impression specifically so the
+question stays answerable; `score_snapshot` IS the training set. Deleting the
+ranker deletes the training set, and the ladder's support for deleting it exists
+only at N=600 — a size the beta will not see.
+
+So the elimination criterion was narrowed to one that cannot be wrong:
+**which logged columns are constant?** A constant column carries zero
+information, cannot enter a fit, and cannot become informative with more rows,
+so deleting one is lossless by measurement rather than by argument.
+
+```bash
+npx tsx scripts/deadcolumns.ts --users 300 --days 60 --seeds 1,2,3
+```
+
+Six of 23 logged columns are constant across every impression:
+
+| column | value | kind |
+|---|---:|---|
+| `features.acceptLikelihood` | 1.0 | constant **in this population**, not structurally |
+| `funnel.pAccept` | 1.0 | same term, downstream |
+| `features.graphAffinity` | 0.0 | declared stub, weight 0.0 |
+| `funnel.exhaustion` | 0.0 | parked, explicit reactivation trigger |
+| `funnel.exposureBoost` | 1.0 | inert in the simulator; mechanism unverified |
+| `funnel.overflow` | 0.0 | inert in the simulator; mechanism unverified |
+
+**None of the six was deleted, and the triage is the finding.**
+
+`acceptLikelihood` is the interesting one. Under the §1.5 abort (ρ = 0) the
+formula collapses to `clamp01(1 × (1 + pickiness × viewerDeviation))`, and it
+measured **identically 1.0 across 3 seeds × 300 users × 60 days**. §F1 recorded
+that the term clips; this shows that under the shipped constants it does not
+merely clip, it is a no-op multiplier. That is the fourth and sharpest version of
+that finding.
+
+But it is constant *because every viewer deviation in this population is
+non-negative*, not because the algebra forces it. A below-average-reputation
+viewer in production yields `P_accept < 1`. **Deleting it would be deleting on a
+simulator artifact** — the exact error recorded three times already in §D4, §E5
+and §F1, and the fact that the deletion would have been convenient is the reason
+to be strictest about it.
+
+`exhaustion` and `graphAffinity` are parked with documented triggers, not dead.
+`exposureBoost` and `overflow` are zero in a simulator whose join model is a
+model; zero there is not zero in production.
+
+**Net: the lossless simplification available here is empty, and that is the
+result.** The ladder says the shipped ordering is already the optimum, and the
+column audit says nothing can be removed from the logging without either losing
+training data or trusting the simulator further than it has earned. The
+simplification is not pending — it already happened, at v1.8, and this pass is
+the confirmation.
+
+### G0.5 — The primary metric, and the result that inverts the premise
+
+§G0.3's optima were measured on `retentionAfterEmpty`. This runs the same
+question on **host retention**, matched seeds, through the separation gate:
+
+```bash
+npx tsx scripts/sweep.ts --arms ranker_repaired,shipped --sizes 150,600 \
+  --seeds 1,2,3,4,5,6,7,8,9,10,11,12 --proximity-weight 0.20 --csv w020.csv
+npx tsx scripts/sweep.ts --arms ranker_repaired --sizes 150,600 \
+  --seeds 1,2,3,4,5,6,7,8,9,10,11,12 --proximity-weight 0.65 --csv w065.csv
+npx tsx scripts/podium.ts w020=w020.csv w065=w065.csv
+```
+
+`shipped` ignores `--proximity-weight` and came back bit-identical across both
+invocations and the §G0.1 ladder (0.958 ±0.002, Gini 0.414 ±0.003), which is
+what makes the cross-run comparison legitimate rather than convenient.
+
+**N=600, host retention:**
+
+```
+ 1  ranker_repaired @ w=0.65    0.968 ±0.003
+ 2  shipped                     0.958 ±0.002     gap 0.011, bar 0.007, 1.49x  SEPARATES
+ 3  ranker_repaired @ w=0.20    0.933 ±0.003     gap 0.024, bar 0.007, 3.32x  SEPARATES
+```
+
+Gini follows: 0.398 / 0.414 / 0.474. Zero-joiner posts 7.6% / 9.2% / 14.2%.
+Hosts alive 63.8% / 58.9% / 50.9%.
+
+**This inverts the premise of the whole exercise.** The finding that has governed
+this repo since v1.5 — the ranker loses to simple proximity ordering — is
+reproduced exactly at `w = 0.20` (3.32×, decisive). Raise the single weight to
+0.65 and the same ranker, unchanged in every other respect, **beats the shipped
+configuration on both primary metrics.** The 28-point retention swing and the
+76-point Gini swing come from one constant.
+
+So "the ranker is worse than nearest-first" may never have been a fact about the
+ranker. It looks like a fact about `w_proximity = 0.20`.
+
+### G0.6 — Why this is NOT being acted on
+
+Every reason below was written down before this result existed. None was
+invented to explain it away, which is the only thing that makes them worth
+anything now.
+
+1. **It favours the ranker, and the standing rule discounts exactly that.** The
+   simulator was authored alongside the ranker it is now vindicating. Every
+   negative result in this file got believed *because* it was against interest;
+   a positive one does not get to skip the discount that bought the negatives
+   their credibility. §G0.1's outside replication is worth more than this
+   precisely because nobody here wrote it.
+2. **Setting it would be tuning a constant to improve a metric.** The prohibition
+   is not general fastidiousness — `collapsed.pJoin.proximity` carries a comment
+   refusing this exact move for this exact parameter, on the grounds that the
+   primary metric did not distinguish the candidates. It distinguishes them now,
+   which changes the evidence and not the rule.
+3. **The optimum is not stable.** §D4 named 0.10 (N=150) and 0.30 (N=600) from
+   these same seeds pre-abort; §G0.3 names 0.70 and 0.65 post-abort. A maximum
+   that relocates by 0.6 when two unrelated constants move is not a maximum, and
+   §D4 is on record as having already been fooled once by a maximum over noisy
+   points.
+4. **It does not separate at beta scale.** At N=150 `ranker_repaired @ 0.65` and
+   `shipped` are a TIE (0.30×). The beta is ~40 users, where §G0.1 could not
+   separate five arms from each other at all. Nothing here licenses a change to
+   what launches.
+5. **`RANKER_ENABLED` is false, so `w_proximity` orders nothing that ships.**
+   Acting on this would mean un-shelving the ranker on simulator evidence — the
+   decision the instrumentation exists to make with real data instead.
+
+**What it does change:** the shelved ranker can no longer be described as
+"measured worse than proximity ordering". The honest statement is that it is
+measured worse *at its current proximity weight*, and materially better at a
+higher one, in a simulator that cannot be trusted to favour it. That belongs in
+the handoff as the first hypothesis to test against live `ranking_events` data —
+where `score_snapshot` already logs every feature needed to fit it, which is what
+the shelving architecture was for.
+
+It also partly vindicates the externally supplied constants file: raising
+proximity to 0.50/0.55 was the right direction. It "only closed part of the gap"
+because it stopped short of the range where the effect lands, and kept the funnel
+(§G0.1: `ranker_no_funnel` beats `ranker_repaired` at the default weight).
