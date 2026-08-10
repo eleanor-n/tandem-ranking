@@ -1209,3 +1209,94 @@ It also partly vindicates the externally supplied constants file: raising
 proximity to 0.50/0.55 was the right direction. It "only closed part of the gap"
 because it stopped short of the range where the effect lands, and kept the funnel
 (§G0.1: `ranker_no_funnel` beats `ranker_repaired` at the default weight).
+
+### G0.7 — The external writeup, read properly, and the confound it exposes
+
+The writeup behind §G0 arrived after §G0.6 was written. It is dated Aug 8 2026,
+titled *tandem-ranking weight tuning*, and reports variants A–D against
+`proximity_only`.
+
+**Its third caveat is the most valuable single observation in this entire file,
+and it invalidates a result of mine.**
+
+> *the sim's hidden join model is affinity × distance only, which hands
+> proximity_only a home-field advantage worth an unknown share of the residual.*
+
+Verified in `scripts/population.ts`:
+
+```js
+const relevance      = affinity * distanceFactor;        // joinDecision()
+const distanceFactor = Math.exp(-miles / 3);             // MODEL.distanceTauMiles
+```
+
+and the ranker's own feature, `features.ts`:
+
+```js
+proximity = Math.exp(-miles / 4);                        // proximityDecayMiles
+```
+
+`exp(-m/4) === exp(-m/3)^0.75`. **The ranker's proximity feature is a monotone
+power transform of a multiplicative term inside the simulator's join
+probability.** Distance is not something the simulator measures the ranker
+against; it is half of how the simulator decides a join happened.
+
+#### What this does to §G0.5
+
+§G0.5 reported that `ranker_repaired @ w=0.65` beats `shipped` on host retention
+at N=600, separated at 1.49×, and called it an inversion of the repo's governing
+premise. **That reading does not survive this.**
+
+Raising `w_proximity` moves the ranker's score toward a monotone transform of a
+factor in the sim's own join function. More joins follow, then fewer empty posts,
+then higher host retention. The causal chain runs through the generative model
+rather than through anything about ranking, and the effect size is inflated by an
+unknown amount.
+
+**The honest verdict: this harness cannot answer the proximity-weight question at
+all.** A proximity sweep here measures how closely the ranker approximates the
+simulator's join function. That retroactively applies to §D4 and §G0.3 as much as
+to §G0.5 — the entire proximity-sweep line of work is measuring the harness.
+
+What survives, because it runs the other way: `proximity_only` still places
+FOURTH on host retention (§G0.1) *despite* holding the home-field advantage. An
+arm that is handed the answer key and still loses the primary metric is a
+stronger result than it looked, not a weaker one. The allocation failure —
+20% zero-joiner posts, 41.3% of hosts alive — is large enough to overcome a
+built-in advantage.
+
+§G0.6 listed five reasons not to act on §G0.5. This is a sixth, it is
+disqualifying rather than cautionary, and it was supplied by the person whose
+result §G0.5 appeared to vindicate.
+
+#### What their table actually measured
+
+| their setup | consequence |
+|---|---|
+| metric is **repeat rate** | the metric `proximity_only` wins by construction (§G0.1). Their whole table is on the ratio that can be won by shrinking the denominator; host retention is not reported |
+| **3 seeds** | §D4 is on record that this harness returns confident wrong answers at three seeds — seed spread at *fixed* `w` reached 0.051 against an across-`w` range of 0.108. §G0 used 12 |
+| arms `full_ranker_fixed`, `regime_adaptive` | **both deleted in v1.8 §2**, because collapsing the density pairs made them the same configuration. They are running a pre-v1.8 checkout, which also explains why the accompanying constants file is a pre-v1.8 fork |
+
+So the headline "-24%/-34% baseline, -15%/-21% tuned" is a repeat-rate gap, at
+three seeds, on a superseded build. All three independently soften it, and §G0.1
+shows the sign flips on the primary metric.
+
+#### What they got right, and it is a lot
+
+1. **The home-field caveat above.** Nobody in this repo had stated it, it is
+   correct, and it disqualifies a finding this repo had just produced in its own
+   favour.
+2. **"Do not paste them into production as truth; use them as the shadow-mode
+   starting point and let `ranking_events` data refit them."** Exactly the
+   architecture already built — `score_snapshot` exists for precisely this.
+3. **"`fresh_host = 0` and `exploreEpsilon = 0` are correct in a world with no
+   host churn payoff and should NOT be shipped as-is... Ship them small, not
+   zero."** Correct, and the current repo already agrees: `quotas.fresh_host` is
+   `0.10` and `exploreEpsilon` is `0.15`. Their variant B/D zeroed both; the
+   caveat corrects their own file.
+4. **Their finding #3** — that pinning the regime beat the adaptive column under
+   a proximity-heavy configuration — is a rediscovery of v1.8 §2, which collapsed
+   the density pairs for this reason. Already actioned; their build predates it.
+
+The one thing to send back: the gap they measured is real but it is a repeat-rate
+gap, and repeat rate is the metric the pool-shrinking algorithm wins by
+definition. The same ladder on host retention puts `proximity_only` fourth.

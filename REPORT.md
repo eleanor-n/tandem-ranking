@@ -6,8 +6,9 @@ closes part of the gap.* The brief was to simplify the algorithm by
 process-of-elimination removal.
 
 **Outcome in one line.** The outside result replicated, then turned out to be a
-statement about the metric; the safe removal set measured empty; and the exercise
-surfaced a result that inverts the premise the repo has run on since v1.5.
+statement about the metric; the safe removal set measured empty; and a result of
+mine that appeared to invert the repo's governing premise was disqualified — by a
+caveat in the outside writeup itself.
 
 **Nothing was changed in the shipping configuration.** No scoring constant moved,
 no module was deleted, `RANKER_ENABLED` is still `false`. 257 tests, typecheck
@@ -58,21 +59,30 @@ demand layer and the session penalties are earning their place; the funnel and
 the interest model are not. **The optimum is the configuration already
 shipping** — a confirmation, not a change.
 
-## 3. Is distance overweighted? No — the opposite, and I got this wrong once
+## 3. Is distance overweighted? The simulator cannot say — see §4
+
+Two corrections live in this section, and the second cancels the first.
 
 I initially reported the proximity sweep as flat. That was read off the first
-two-thirds of the output and it was wrong; it is corrected in place in
-`DIAGNOSTICS.md` §G0.3 rather than quietly fixed, because "read a partial sweep,
-called it flat" is the same error class as §D4's three-seed optimum.
+two-thirds of the output and it was wrong; corrected in place in
+`DIAGNOSTICS.md` §G0.3 rather than quietly, because "read a partial sweep, called
+it flat" is the same error class as §D4's three-seed optimum.
 
 The full range identifies optima at **w = 0.70 (N=150)** and **0.65 (N=600)**,
 both clearing 2 SE — roughly **3× the shipped 0.20** — with repeat rate still
-rising at 0.80, the top of the swept range.
+rising at 0.80, the top of the swept range. So the sign appeared to point the
+opposite way from the question: proximity looked *under*-weighted.
 
-## 4. The result that inverts the premise
+**Then §4 disqualified the measurement entirely.** Distance sits inside the
+simulator's join model, so every proximity sweep in this harness — §D4's, this
+one, and §4's — is measuring how closely the ranker approximates the sim's own
+join function. The answer to "is distance overweighted" is **not obtainable
+here**, in either direction.
 
-§G0.3 measured a secondary metric. Run on **host retention**, matched seeds,
-through the gate:
+## 4. A result that appeared to invert the premise — and why it does not
+
+§3 measured a secondary metric. Run on **host retention**, matched seeds, through
+the gate:
 
 ```
 N=600, host retention
@@ -81,36 +91,56 @@ N=600, host retention
  3  ranker_repaired @ w=0.20    0.933 ±0.003    3.32×  SEPARATES
 ```
 
-Gini 0.398 / 0.414 / 0.474. Zero-joiner 7.6% / 9.2% / 14.2%.
+Read alone, that inverts everything: the governing finding since v1.5 reproduces
+decisively at `w = 0.20`, and changing that one weight makes the same ranker beat
+the shipped configuration on both primary metrics.
 
-The governing finding of this repo — the ranker loses to simple proximity
-ordering — reproduces decisively at `w = 0.20` (3.32×). Change that one weight to
-0.65 and the same ranker, otherwise untouched, **beats the shipped configuration
-on both primary metrics.**
+**It does not survive the outside writeup's own third caveat**, which arrived
+after this was measured:
 
-"The ranker is worse than nearest-first" may never have been a fact about the
-ranker. It looks like a fact about `w_proximity = 0.20`.
+> *the sim's hidden join model is affinity × distance only, which hands
+> `proximity_only` a home-field advantage worth an unknown share of the residual.*
+
+Verified. `scripts/population.ts` computes join probability from
+`relevance = affinity × exp(−miles/3)`, and the ranker's proximity feature is
+`exp(−miles/4)` — which is `exp(−miles/3)^0.75`. **The ranker's proximity feature
+is a monotone transform of a multiplicative term inside the simulator's own join
+probability.**
+
+So raising `w_proximity` moves the ranker toward the sim's generative model. More
+joins follow, then fewer empty posts, then higher retention — a chain that runs
+through the data-generating process, not through anything about ranking.
+
+**This harness cannot answer the proximity-weight question at all.** That applies
+equally to §D4, to §3 above, and to this section. The whole proximity-sweep line
+of work is measuring the harness.
+
+**What survives, running the other way:** `proximity_only` places *fourth* on
+host retention **while holding the home-field advantage**. An arm handed the
+answer key that still loses the primary metric is a stronger result than it
+looked — its allocation failure (20% zero-joiner, 41.3% of hosts alive) is large
+enough to overcome a built-in edge.
 
 ## 5. Why nothing was changed
 
-Every reason predates the result. None was invented to explain it away.
+Reasons 1–5 predate the result. Reason 6 came from the outside writeup and is
+disqualifying rather than cautionary.
 
 1. **It favours the ranker, and the standing rule discounts exactly that.** The
    simulator was authored alongside the ranker it now vindicates. The negative
    results were believed *because* they were against interest; a positive one
-   does not get to skip the discount that bought them their credibility.
+   does not get to skip the toll that bought them their credibility.
 2. **Setting it would be tuning a constant to improve a metric** — and
    `collapsed.pJoin.proximity` already carries a comment refusing this exact move
    for this exact parameter.
 3. **The optimum is not stable.** §D4 named 0.10 / 0.30 from these same seeds
-   pre-abort; this run names 0.70 / 0.65 post-abort. A maximum that relocates by
-   0.6 when two unrelated constants move is not a maximum.
+   pre-abort; this run names 0.70 / 0.65 post-abort.
 4. **It does not separate at beta scale.** At N=150 it is a TIE (0.30×). At N=40
-   the ladder could not separate five arms from each other at all. The beta is
-   ~40 users.
+   the ladder could not separate five arms at all. The beta is ~40 users.
 5. **`RANKER_ENABLED` is false**, so `w_proximity` orders nothing that ships.
-   Acting would mean un-shelving the ranker on simulator evidence — the decision
-   the instrumentation exists to make with real data instead.
+6. **The measurement is confounded by the simulator's join model** (§4). This one
+   is not a reason to be careful; it is a reason the number means something other
+   than what it appears to.
 
 ## 6. Why the ranker was not deleted
 
@@ -163,17 +193,38 @@ block, revert the v1.8 §2 density collapse, and undo both pre-registered aborts
 (`repeatableContext` 0 → 0.25; `hostAcceptDamping` removed entirely). It would
 not compile, and the parts that would are the aborts coming back.
 
-Its direction on proximity was right (§4). It closed only part of the gap because
-it stopped at 0.55 — short of where the effect lands — and kept the funnel, which
-the ladder shows is a net negative at the default weight.
+Its direction on proximity cannot be judged from the simulator (§4), and their
+own writeup is the reason — the home-field caveat is theirs, and it disqualifies
+the evidence that would otherwise have supported their change. Their writeup also
+says exactly the right thing about this: *"use them as the shadow-mode starting
+point and let `ranking_events` data refit them."* That is the correct disposition
+and it is what the logging architecture was built for.
+
+Three things about their method are worth sending back, none of which makes the
+work less useful:
+
+- The metric is **repeat rate** — the one `proximity_only` wins by construction
+  (§1). Host retention is not reported, and it reverses the ranking.
+- **Three seeds.** §D4 is on record that this harness returns confident wrong
+  answers at three; the seed spread at *fixed* `w` reached 0.051 against an
+  across-`w` range of 0.108. §1–§4 used twelve.
+- The arms `full_ranker_fixed` and `regime_adaptive` were **deleted in v1.8 §2**
+  — collapsing the density pairs made them the same configuration. Their finding
+  #3 (pinning the regime beats adapting it) is a rediscovery of that collapse,
+  already actioned.
+
+Their caveat that `fresh_host = 0` and `exploreEpsilon = 0` should not ship is
+correct, and the current repo already agrees: `quotas.fresh_host` is `0.10` and
+`exploreEpsilon` is `0.15`.
 
 ## 8. What to do next, in order
 
 1. **Ship as-is.** Nothing in this audit licenses a change to the launch config.
 2. **Turn on logging.** `score_snapshot` already carries every feature needed to
    test §4 against real behaviour.
-3. **First hypothesis to test on live data:** is `w_proximity` too low? This is
-   now the highest-value open question, ahead of `demandWeight`.
+3. **First hypothesis to test on live data:** is `w_proximity` too low? Still the
+   highest-value open question, ahead of `demandWeight` — but it can now only be
+   settled against real `ranking_events`, never against this simulator (§4).
 4. **Second:** the un-clipped `P_accept` form (`FUNNEL.md` §8), raised in priority
    by §6 — the term currently contributes nothing at all.
 5. **Do not re-run the simulator to settle either.** Both questions are now at the
@@ -186,6 +237,7 @@ the ladder shows is a net negative at the default weight.
 | `scripts/deadcolumns.ts` | **new** — constant-column audit over the logged snapshot |
 | `DIAGNOSTICS.md` | **new §G0** — ladder, proximity sweep, primary-metric result, triage |
 | `FUNNEL.md` §4 | v1.9.1 note: `P_accept` is a no-op, not a damped term |
+| `DIAGNOSTICS.md` §G0.7 | the external writeup read in full; the join-model confound |
 | `REPORT.md` | this file |
 
 No source file under `src/` was modified. No constant moved.
