@@ -912,9 +912,22 @@ const pm = (x: number, se: number) => `${x.toFixed(3)} ±${se.toFixed(3)}`;
 const pmPct = (x: number, se: number) =>
   `${(x * 100).toFixed(1)}% ±${(se * 100).toFixed(1)}`;
 
+/**
+ * COLUMN ORDER IS A CLAIM. Host retention and host Gini lead, both bold.
+ *
+ * Gini used to sit in column nine, between "surviving hosts" and "deck
+ * relevance", which is where a reader stops looking. It is the most robust
+ * separation this harness produces — at N=600 the shipped/proximity_only gap is
+ * five times the gap on the primary metric, and it is the one place
+ * `proximity_only` fails unambiguously rather than arguably. Column nine was
+ * underselling the strongest result in the build.
+ *
+ * Host retention stays first: it is still the primary metric and the thing the
+ * beta is steering by. Gini is promoted to sit beside it, not above it.
+ */
 function markdownTable(rows: Aggregate[]): string {
   const out: string[] = [];
-  out.push('| N | coverage | regime | arm | **host retention** | retention after empty | repeat rate | tandems/user | zero-joiner posts | surviving hosts | host Gini | deck relevance |');
+  out.push('| N | coverage | regime | arm | **host retention** | **host Gini** | retention after empty | repeat rate | tandems/user | zero-joiner posts | surviving hosts | deck relevance |');
   out.push('|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|');
 
   const sizes = [...new Set(rows.map((r) => r.users))].sort((a, b) => a - b);
@@ -930,12 +943,12 @@ function markdownTable(rows: Aggregate[]): string {
         `| ${isFirst ? n3(anchor?.meanRegime ?? 0) : ''}`,
         `| ${row.arm === 'shipped' ? `**${row.arm}**` : row.arm}`,
         `| **${pm(row.hostRetention, row.se.hostRetention)}**`,
+        `| **${pm(row.hostGini, row.se.hostGini)}**`,
         `| ${pm(row.retentionAfterEmpty, row.se.retentionAfterEmpty)}`,
         `| ${pm(row.repeatRate, row.se.repeatRate)}`,
         `| ${n3(row.tandemsPerUser)}`,
         `| ${pmPct(row.zeroJoinerRate, row.se.zeroJoinerRate)}`,
         `| ${pct(row.survivingHostFraction)}`,
-        `| ${pm(row.hostGini, row.se.hostGini)}`,
         `| ${pm(row.deckRelevance, row.se.deckRelevance)} |`,
       ].join('').trim());
     }

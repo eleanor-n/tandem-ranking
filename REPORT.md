@@ -22,13 +22,16 @@ Full working: `DIAGNOSTICS.md` §G0.
 
 Five-arm ladder, 12 seeds, gated at 2 SE. N=600:
 
-| arm | host retention | repeat rate | zero-joiner | hosts alive | Gini |
+| arm | host retention | host Gini | repeat rate | zero-joiner | hosts alive |
 |---|---:|---:|---:|---:|---:|
-| shipped | **0.958** ±0.002 | 0.518 | 9.2% | 58.9% | **0.414** |
-| ranker_no_funnel | 0.948 ±0.003 | 0.372 | 9.8% | 58.9% | 0.428 |
-| ranker_repaired | 0.940 ±0.003 | 0.382 | 12.9% | 52.9% | 0.463 |
-| proximity_only | 0.935 ±0.003 | **0.657** | 20.0% | 41.3% | 0.535 |
-| random | 0.862 ±0.003 | 0.053 | 43.0% | 22.6% | 0.645 |
+| shipped | **0.958** ±0.002 | **0.414** | 0.518 | 9.2% | 58.9% |
+| ranker_no_funnel | 0.948 ±0.003 | 0.428 | 0.372 | 9.8% | 58.9% |
+| ranker_repaired | 0.940 ±0.003 | 0.463 | 0.382 | 12.9% | 52.9% |
+| proximity_only | 0.935 ±0.003 | 0.535 | **0.657** | 20.0% | 41.3% |
+| random | 0.862 ±0.003 | 0.645 | 0.053 | 43.0% | 22.6% |
+
+Host Gini is the second column rather than the last because it is the most
+robust separation in the build — see §1.2.
 
 On **repeat rate**, nearest-first wins everywhere by 72% — the outside result,
 reproduced. On **host retention** it comes fourth.
@@ -56,6 +59,26 @@ does not make the differences unreal — they are gated at 2 SE and some of them
 clear it — but a reader who sees `0.958` next to `0.935` without the floor has
 no way to size them. The sweep now prints the floor, the ceiling and each arm's
 rescaled position under every metric that carries a standard error.
+
+### 1.2 Where the arms actually separate: attention distribution
+
+The retention column is compressed. The **Gini** column is not:
+
+| | shipped | proximity_only | span |
+|---|---:|---:|---:|
+| host retention | 0.958 | 0.935 | 0.023 |
+| host Gini | 0.414 | 0.535 | 0.121 |
+
+On host retention `shipped` beats `proximity_only` by 0.023 against a floor
+0.096 wide. On Gini it beats it by 0.121 — five times the gap, on a metric where
+`random` is worst and the ordering is not in dispute. Attention distribution is
+where the shipped configuration's advantage is largest and least ambiguous, and
+it is the one place `proximity_only` fails outright rather than arguably: it
+concentrates joiners on a few hosts, which is the mechanism behind its 20.0%
+zero-joiner rate and its 41.3% surviving hosts.
+
+This is a change of emphasis, not of result. The number was already in the
+build; it was in column nine.
 
 ## 2. Does simplification help? Yes — and the optimum is already occupied
 
