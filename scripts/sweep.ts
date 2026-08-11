@@ -39,6 +39,9 @@
  * the metric did.
  */
 
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { getHeapStatistics } from 'node:v8';
+
 import { rank } from '../src/ranking/core/rank.js';
 import { computeRegime, resolveParams } from '../src/ranking/core/regime.js';
 import { CONSTANTS, IDEAL_SATURDAY_METRICS } from '../src/ranking/core/constants.js';
@@ -180,6 +183,19 @@ interface Options {
   deckSize: number;
   csvPath: string | null;
   mdPath: string | null;
+  /**
+   * Where the PER-SEED rows are streamed, one line per (arm, seed, size) as it
+   * completes. Defaults to `<csvPath>.rows.csv` when `--csv` is given.
+   *
+   * This is a SEPARATE artifact from `--csv`, and deliberately so. `--csv` holds
+   * aggregates — one row per (size, arm), averaged over seeds, with the `se_*`
+   * columns `podium.ts` reads. An aggregate cannot be written before its last
+   * seed finishes, so it cannot be the thing that survives a kill. The rows file
+   * can: it is the raw material the aggregate is computed from, so a killed run
+   * loses no simulation, and the aggregate for any completed cell can be
+   * recomputed from it.
+   */
+  rowsPath: string | null;
   /** §4.2. Re-enables exhaustion at the v1.6 rates. */
   exhaustionOn: boolean;
   /** §4.4. Overrides w_proximity at both ends of the pair. */
@@ -241,14 +257,18 @@ function parseArgs(): Options {
   }
 
   const weight = flag('--proximity-weight');
+  const csvPath = flag('--csv');
+  const rowsPath = flag('--rows')
+    ?? (csvPath === null ? null : `${csvPath.replace(/\.csv$/, '')}.rows.csv`);
 
   return {
     sizes: nums(flag('--sizes'), [20, 40, 80, 150, 300, 600]),
     seeds: nums(flag('--seeds'), [1, 2, 3]),
     days: Number(flag('--days') ?? 120),
     deckSize: Number(flag('--deck') ?? CONSTANTS.slate.deckSize),
-    csvPath: flag('--csv'),
+    csvPath,
     mdPath: flag('--md'),
+    rowsPath,
     exhaustionOn: flag('--exhaustion') === 'on',
     proximityWeight: weight === null ? null : Number(weight),
     proximitySweep: argv.includes('--proximity-sweep'),
@@ -330,6 +350,59 @@ interface Result {
   /** Mean coverage across users at the end — where on the continuum this landed. */
   meanCoverage: number;
   meanRegime: number;
+}
+
+/** The per-seed row columns, in order. Both the header and the row derive from this. */
+const ROW_FIELDS = [
+  'impressions', 'joins', 'completions', 'repeats',
+  'hostRetention', 'retentionDenominator', 'retentionAfterEmpty', 'emptyFirstPostHosts',
+  'tandemsPerUser', 'repeatRate', 'zeroJoinerRate',
+  'survivingHosts', 'survivingHostFraction', 'hostGini', 'deckRelevance',
+  'meanCoverage', 'meanRegime',
+] as const satisfies readonly (keyof Result)[];
+
+/**
+ * Streams one CSV line per completed (arm, seed, size).
+ *
+ * WHY SYNCHRONOUS, UNBUFFERED APPENDS.
+ *
+ * A 12-seed N=600 sweep is an hour of simulation. It used to hold every result
+ * in memory and write once at the end, so the run had a single point at which
+ * it became durable, and a process that died before reaching it — memory
+ * exhaustion, a stray Ctrl-C, a laptop lid — destroyed every completed cell with
+ * it. That is not a performance problem, it is a data-loss problem: the
+ * expensive thing is the simulation, and it was the only thing not being saved.
+ *
+ * `appendFileSync` returns after the write syscall, so a row that this function
+ * has returned from is on disk and survives SIGKILL. Buffering it through a
+ * stream would put the last rows back in the process's memory, which is the
+ * exact thing being defended against.
+ */
+class RowSink {
+  private readonly path: string;
+  private started = false;
+  private written = 0;
+
+  constructor(path: string) {
+    this.path = path;
+  }
+
+  append(r: Result): void {
+    const n6 = (x: number) => (Number.isInteger(x) ? String(x) : x.toFixed(6));
+    if (!this.started) {
+      writeFileSync(this.path, `${['users', 'arm', 'seed', ...ROW_FIELDS].join(',')}\n`);
+      this.started = true;
+    }
+    appendFileSync(
+      this.path,
+      `${[r.users, r.arm, r.seed, ...ROW_FIELDS.map((f) => n6(r[f]))].join(',')}\n`,
+    );
+    this.written += 1;
+  }
+
+  get count(): number {
+    return this.written;
+  }
 }
 
 /**
@@ -484,8 +557,21 @@ function runOne(arm: Arm, users: number, seed: number, opts: Options): Result {
   let emptyPosts = 0;
 
   const joinersPerHost = new Map<string, number>();
-  const coverageSamples: number[] = [];
-  const regimeSamples: number[] = [];
+
+  /**
+   * Running sums, not sample arrays.
+   *
+   * These used to be two `number[]` pushed once per person per session-day. At
+   * N=600 over 120 days that is up to 72,000 boxed doubles per array, per run,
+   * retained for the whole run purely so `mean()` could be called on them at the
+   * end. Only the mean is ever read, and a mean needs a sum and a count.
+   *
+   * Arithmetically identical — same addends, same order, same divisor.
+   */
+  let coverageSum = 0;
+  let coverageN = 0;
+  let regimeSum = 0;
+  let regimeN = 0;
 
   /**
    * Post lookup by id.
@@ -531,11 +617,11 @@ function runOne(arm: Arm, users: number, seed: number, opts: Options): Result {
         const regime = regimeFor(world, person.id, pool.length);
 
         if (arm === 'shipped') {
-          regimeSamples.push(regime);
-          coverageSamples.push(
-            pool.length / (world.weeklyImpressions.get(person.id)
-              || CONSTANTS.regime.defaultCardsViewedPerWeek),
-          );
+          regimeSum += regime;
+          regimeN += 1;
+          coverageSum += pool.length / (world.weeklyImpressions.get(person.id)
+            || CONSTANTS.regime.defaultCardsViewedPerWeek);
+          coverageN += 1;
         }
 
         const override = armParams(arm, regime, opts);
@@ -622,8 +708,8 @@ function runOne(arm: Arm, users: number, seed: number, opts: Options): Result {
     survivingHostFraction: survivingHosts / users,
     hostGini: gini(hostCounts),
     deckRelevance: impressions > 0 ? relevanceSum / impressions : 0,
-    meanCoverage: mean(coverageSamples),
-    meanRegime: mean(regimeSamples),
+    meanCoverage: coverageN > 0 ? coverageSum / coverageN : 0,
+    meanRegime: regimeN > 0 ? regimeSum / regimeN : 0,
   };
 }
 
@@ -973,10 +1059,97 @@ async function proximitySweep(opts: Options): Promise<void> {
   }
 
   if (opts.mdPath) {
-    const { writeFileSync } = await import('node:fs');
     writeFileSync(opts.mdPath, `${table.join('\n')}\n`);
     console.log(`wrote ${opts.mdPath}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Running one cell without losing it
+// ---------------------------------------------------------------------------
+
+/**
+ * Fraction of the V8 heap limit past which the next run is not attempted.
+ *
+ * 0.85 rather than something nearer 1.0 because the check happens BETWEEN runs
+ * and a run allocates as it goes: the useful question is not "is the heap full
+ * now" but "is there room for another one of these", and a sweep cell that has
+ * just used 15% of the heap will use about that much again.
+ */
+const HEAP_ABORT_FRACTION = 0.85;
+
+const mb = (bytes: number) => `${Math.round(bytes / 1048576)} MB`;
+
+/**
+ * Run one (arm, seed, size) cell, stream it, and refuse to die quietly.
+ *
+ * THE FAILURE THIS REPLACES. At 12 seeds x N=600 the process stopped, printed
+ * nothing, and left no file. There was no error, no exit code worth reading, and
+ * no partial output — an hour of simulation produced the same artifact as never
+ * having run it, and nothing on the terminal said which cell it had reached.
+ *
+ * Three defences, in the order they fire:
+ *
+ *   1. A BREADCRUMB to stderr before the cell starts. A V8 heap abort is a
+ *      SIGABRT from inside the allocator — it cannot be caught, no handler runs,
+ *      and no `finally` executes. The only thing that survives it is what was
+ *      already written. So the cell about to run is announced before it runs,
+ *      and a hard abort leaves its identity as the last line on the terminal.
+ *   2. A CATCH around the run, reporting arm/seed/size and exiting nonzero.
+ *      Catches RangeError from an oversized allocation and anything thrown by
+ *      the model.
+ *   3. A HEAP CHECK after the run. This is the one that actually converts the
+ *      silent death into a message: rather than letting the next cell walk into
+ *      the allocator and abort, it notices there is no room left for another one
+ *      and exits first, while a `console.error` still works.
+ *
+ * The streamed row is written before any of that matters, so every cell that
+ * finished is on disk regardless of how the process ends.
+ */
+function runSafely(
+  arm: Arm, users: number, seed: number, opts: Options, sink: RowSink | null,
+): Result {
+  const heap = getHeapStatistics();
+  process.stderr.write(
+    `    [run] arm=${arm} N=${users} seed=${seed} ` +
+    `heap=${mb(heap.used_heap_size)}/${mb(heap.heap_size_limit)}\n`,
+  );
+
+  let result: Result;
+  try {
+    result = runOne(arm, users, seed, opts);
+  } catch (error) {
+    console.error(
+      `\nSWEEP FAILED at arm=${arm} N=${users} seed=${seed}\n` +
+      `  ${error instanceof Error ? error.stack : String(error)}\n` +
+      (sink
+        ? `  ${sink.count} completed row(s) are on disk at ${opts.rowsPath} and are not lost.\n`
+        : '  No --csv/--rows was given, so nothing was streamed. Pass one for long runs.\n'),
+    );
+    process.exit(1);
+  }
+
+  sink?.append(result);
+
+  const after = getHeapStatistics();
+  if (after.used_heap_size > HEAP_ABORT_FRACTION * after.heap_size_limit) {
+    console.error(
+      `\nSWEEP STOPPING: out of heap after arm=${arm} N=${users} seed=${seed}\n` +
+      `  used ${mb(after.used_heap_size)} of a ${mb(after.heap_size_limit)} limit ` +
+      `(over the ${HEAP_ABORT_FRACTION} abort fraction).\n` +
+      `  The next cell would very likely abort inside the allocator, which prints ` +
+      'nothing at all. Stopping here so this message exists.\n' +
+      (sink
+        ? `  ${sink.count} completed row(s) are on disk at ${opts.rowsPath}.\n`
+        : '  Nothing was streamed — pass --csv or --rows so a stop like this keeps its work.\n') +
+      '  Re-run with a bigger heap, e.g.\n' +
+      `    NODE_OPTIONS=--max-old-space-size=8192 npm run sweep -- --sizes ${users} ...\n` +
+      '  or split the seed list across invocations and merge with `npm run podium`.\n',
+    );
+    process.exit(1);
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,11 +1190,20 @@ async function main(): Promise<void> {
   for (const arm of opts.arms) console.log(`  ${arm.padEnd(19)} ${ARM_NOTES[arm]}`);
   console.log('');
 
+  const sink = opts.rowsPath === null ? null : new RowSink(opts.rowsPath);
+  if (sink) {
+    console.log(`  streaming per-seed rows to ${opts.rowsPath} as each one finishes`);
+    console.log('');
+  }
+
   const aggregates: Aggregate[] = [];
 
   for (const users of opts.sizes) {
     for (const arm of opts.arms) {
-      const runs = opts.seeds.map((seed) => runOne(arm, users, seed, opts));
+      const runs: Result[] = [];
+      for (const seed of opts.seeds) {
+        runs.push(runSafely(arm, users, seed, opts, sink));
+      }
       aggregates.push(aggregate(runs));
     }
     const at = (arm: Arm) => aggregates.find((x) => x.users === users && x.arm === arm);
@@ -1081,17 +1263,15 @@ async function main(): Promise<void> {
     }
   }
 
-  if (opts.csvPath || opts.mdPath) {
-    const { writeFileSync } = await import('node:fs');
-    if (opts.csvPath) {
-      writeFileSync(opts.csvPath, `${csv(aggregates)}\n`);
-      console.log(`wrote ${opts.csvPath}`);
-    }
-    if (opts.mdPath) {
-      writeFileSync(opts.mdPath, `${table}\n`);
-      console.log(`wrote ${opts.mdPath}`);
-    }
+  if (opts.csvPath) {
+    writeFileSync(opts.csvPath, `${csv(aggregates)}\n`);
+    console.log(`wrote ${opts.csvPath}`);
   }
+  if (opts.mdPath) {
+    writeFileSync(opts.mdPath, `${table}\n`);
+    console.log(`wrote ${opts.mdPath}`);
+  }
+  if (sink) console.log(`wrote ${opts.rowsPath} (${sink.count} per-seed rows)`);
 }
 
 main().catch((error) => {
