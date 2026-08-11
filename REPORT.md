@@ -43,6 +43,20 @@ nobody** (20.0% vs 9.2%) and keeping **a third fewer hosts alive** (41.3% vs
 Nearest-first makes the people it serves tandem more, and serves fewer people.
 Both parties were measuring correctly; they were measuring different things.
 
+### 1.1 How much of the retention column is signal
+
+Host retention at N=600 runs from **0.862** at the `random` floor to **0.958**
+at the ceiling. The floor is **90.0% of the ceiling**, and the entire five-arm
+ladder occupies the remaining **0.096**.
+
+Shuffling the deck at random retains nine hosts out of ten that the best
+configuration retains. Every ranking decision in this repo is argued inside the
+last tenth of the scale, and the four non-random arms inside 0.023 of it. This
+does not make the differences unreal — they are gated at 2 SE and some of them
+clear it — but a reader who sees `0.958` next to `0.935` without the floor has
+no way to size them. The sweep now prints the floor, the ceiling and each arm's
+rescaled position under every metric that carries a standard error.
+
 ## 2. Does simplification help? Yes — and the optimum is already occupied
 
 Reading the ladder as a complexity ladder (N=600):

@@ -752,6 +752,26 @@ const SE_METRICS = [
 
 type SeMetric = (typeof SE_METRICS)[number];
 
+/**
+ * Which way is up, per metric.
+ *
+ * Needed by the dynamic-range block: rescaling against a floor and a ceiling
+ * requires knowing which end is the ceiling, and for Gini and zero-joiner rate
+ * that is the low end. Kept as an explicit map rather than inferred from the
+ * numbers, because inferring it would make the direction a property of whichever
+ * arm happened to win.
+ */
+const HIGHER_IS_BETTER: Record<SeMetric, boolean> = {
+  hostRetention: true,
+  retentionAfterEmpty: true,
+  repeatRate: true,
+  zeroJoinerRate: false,
+  survivingHostFraction: true,
+  hostGini: false,
+  deckRelevance: true,
+  tandemsPerUser: true,
+};
+
 interface Aggregate extends Omit<Result, 'seed'> {
   seeds: number;
   /** Standard error of the mean across seeds, per headline metric. */
@@ -905,10 +925,14 @@ function csv(rows: Aggregate[]): string {
  * and B does not separate from C, the podium's top is a three-way tie regardless
  * of whether A separates from C.
  */
+function ordered(rows: Aggregate[], metric: SeMetric, higherIsBetter: boolean): Aggregate[] {
+  return rows.slice().sort((a, b) =>
+    higherIsBetter ? b[metric] - a[metric] : a[metric] - b[metric]);
+}
+
 function podium(rows: Aggregate[], metric: SeMetric, higherIsBetter = true): string[] {
   const out: string[] = [];
-  const sorted = rows.slice().sort((a, b) =>
-    higherIsBetter ? b[metric] - a[metric] : a[metric] - b[metric]);
+  const sorted = ordered(rows, metric, higherIsBetter);
 
   out.push(`  ${metric} @ N=${sorted[0]?.users}, ${sorted[0]?.seeds} seeds ` +
     `(${higherIsBetter ? 'higher' : 'lower'} is better)`);
@@ -952,6 +976,66 @@ function podium(rows: Aggregate[], metric: SeMetric, higherIsBetter = true): str
     out.push(`    VERDICT: NOT IDENTIFIED at the top. ` +
       `${top.map((r) => r.arm).join(', ')} are tied for first; ` +
       `the winner is not determined by this data.`);
+  }
+
+  out.push(...dynamicRange(sorted, metric, higherIsBetter));
+  return out;
+}
+
+/**
+ * How much of this metric's ladder is actually signal.
+ *
+ * A podium that reads 0.958 / 0.948 / 0.940 / 0.935 / 0.862 looks like five arms
+ * spread across a scale. It is not: the floor is `random`, and on host retention
+ * random already scores about 90% of the winner. Every design decision in this
+ * repo is being argued inside the remaining tenth, and a reader who sees only
+ * the raw column has no way to know that.
+ *
+ * So: pin 0 at the random arm, pin 1 at the best arm, and print where each arm
+ * falls on that line. The rescaling is a linear map with the two ends named, and
+ * it works unchanged for lower-is-better metrics because the ends are chosen by
+ * direction rather than by magnitude.
+ *
+ * This is presentation, not a new test. Nothing is gated on it, and the raw
+ * numbers stay directly above it.
+ */
+function dynamicRange(
+  sorted: Aggregate[], metric: SeMetric, higherIsBetter: boolean,
+): string[] {
+  const floorRow = sorted.find((r) => r.arm === 'random');
+  if (!floorRow) {
+    return ['', `    dynamic range: not computable — the 'random' arm is not in this run, ` +
+      'and the floor is defined as random rather than as the worst arm present.'];
+  }
+
+  const best = sorted.reduce((a, b) =>
+    (higherIsBetter ? b[metric] > a[metric] : b[metric] < a[metric]) ? b : a);
+
+  const floor = floorRow[metric];
+  const ceiling = best[metric];
+  const span = ceiling - floor;
+
+  const out: string[] = [''];
+  out.push(`    dynamic range   floor ${n3(floor)} (random)  ->  ` +
+    `ceiling ${n3(ceiling)} (${best.arm})   span ${n3(Math.abs(span))}`);
+
+  if (span === 0) {
+    out.push('      every arm scores the floor. Nothing to rescale, and nothing to report.');
+    return out;
+  }
+
+  // The floor as a fraction of the ceiling, which is the number that says how
+  // much of the scale is unavailable to any algorithm. Only meaningful where the
+  // metric has a real zero and higher is better; on Gini a "90% of ceiling"
+  // reading would be arithmetic without a referent.
+  if (higherIsBetter && ceiling !== 0) {
+    out.push(`      the floor is ${pct(floor / ceiling)} of the ceiling — ` +
+      `the ladder is ${n3(Math.abs(span))} wide on a scale that starts at ${n3(floor)}`);
+  }
+
+  out.push('      rescaled (random = 0.00, best = 1.00):');
+  for (const row of sorted) {
+    out.push(`        ${row.arm.padEnd(18)} ${((row[metric] - floor) / span).toFixed(2)}`);
   }
   return out;
 }
@@ -1229,6 +1313,25 @@ async function main(): Promise<void> {
     console.log('');
     for (const line of podium(group, 'hostGini', false)) console.log(line);
     console.log('');
+  }
+
+  // Every OTHER metric that carries an SE gets its range too. Without this the
+  // rescaling would exist only for the two metrics that happen to have podiums,
+  // and the reader of any secondary column would be back to guessing how much of
+  // it is reachable.
+  console.log('=== DYNAMIC RANGE, remaining SE metrics ===');
+  for (const users of opts.sizes) {
+    const group = aggregates.filter((x) => x.users === users);
+    if (group.length < 2) continue;
+    for (const metric of SE_METRICS) {
+      if (metric === 'hostRetention' || metric === 'hostGini') continue;  // shown above
+      const dir = HIGHER_IS_BETTER[metric];
+      console.log(`  ${metric} @ N=${users} (${dir ? 'higher' : 'lower'} is better)`);
+      for (const line of dynamicRange(ordered(group, metric, dir), metric, dir)) {
+        console.log(line);
+      }
+      console.log('');
+    }
   }
 
   // §4.3: losing to random is a BUG, not a design failure. Say so loudly.
