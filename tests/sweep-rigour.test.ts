@@ -23,6 +23,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { aggregate, paired, separates, type Arm, type Result } from '../scripts/sweep.js';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const sweepPath = resolve(here, '../scripts/sweep.ts');
 const source = readFileSync(sweepPath, 'utf8');
@@ -113,6 +115,103 @@ describe('the CSV is a data artifact, not a display one', () => {
     expect(generated.length, 'header and rows must both derive from SE_METRICS')
       .toBeGreaterThanOrEqual(2);
     expect(csvFn).toContain('se_${m}');
+  });
+});
+
+describe('the paired test differences within a seed, then averages', () => {
+  /**
+   * A Result with one metric set and everything else zeroed.
+   *
+   * The paired computation reads `seed` and one metric; filling the other
+   * seventeen fields with plausible-looking numbers would suggest they matter.
+   */
+  function result(arm: Arm, seed: number, hostRetention: number): Result {
+    return {
+      arm, users: 600, seed,
+      impressions: 0, joins: 0, completions: 0, repeats: 0,
+      hostRetention,
+      retentionDenominator: 0, retentionAfterEmpty: 0, emptyFirstPostHosts: 0,
+      tandemsPerUser: 0, repeatRate: 0, zeroJoinerRate: 0,
+      survivingHosts: 0, survivingHostFraction: 0, hostGini: 0, deckRelevance: 0,
+      meanCoverage: 0, meanRegime: 0,
+    };
+  }
+
+  const armA = aggregate([
+    result('shipped', 1, 0.90), result('shipped', 2, 0.95), result('shipped', 3, 1.00),
+  ]);
+
+  // Same three VALUES in both, so both arms have identical means and identical
+  // per-arm standard errors. Only which seed each value belongs to differs.
+  const consistent = aggregate([
+    result('random', 1, 0.88), result('random', 2, 0.93), result('random', 3, 0.98),
+  ]);
+  const swinging = aggregate([
+    result('random', 1, 0.98), result('random', 2, 0.88), result('random', 3, 0.93),
+  ]);
+
+  it('is a per-seed difference, NOT a difference of means', () => {
+    // The two comparisons are indistinguishable to anything that only looks at
+    // means: same gap, same SEs, same unpaired verdict.
+    expect(consistent.hostRetention).toBeCloseTo(swinging.hostRetention, 12);
+    expect(consistent.se.hostRetention).toBeCloseTo(swinging.se.hostRetention, 12);
+    expect(separates(armA, consistent, 'hostRetention'))
+      .toBe(separates(armA, swinging, 'hostRetention'));
+
+    const a = paired(armA, consistent, 'hostRetention');
+    const b = paired(armA, swinging, 'hostRetention');
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+
+    // Identical point estimates — mean(a_i - b_i) IS mean(a) - mean(b).
+    expect(a?.mean).toBeCloseTo(0.02, 12);
+    expect(b?.mean).toBeCloseTo(0.02, 12);
+
+    // ...and completely different error bars, because the differences differ.
+    // +0.02 on every seed is a real effect; a gap swinging -0.08/+0.07/+0.07 is
+    // not, and only a test that subtracts within a seed can tell them apart.
+    expect(a?.se).toBeCloseTo(0, 9);
+    expect(b?.se).toBeCloseTo(0.05, 9);
+    expect(a?.separates, 'a constant per-seed gap must separate').toBe(true);
+    expect(b?.separates, 'a swinging per-seed gap must not').toBe(false);
+  });
+
+  it('matches on seed number, not on array position', () => {
+    const shuffled = aggregate([
+      result('random', 3, 0.98), result('random', 1, 0.88), result('random', 2, 0.93),
+    ]);
+    const inOrder = paired(armA, consistent, 'hostRetention');
+    const outOfOrder = paired(armA, shuffled, 'hostRetention');
+
+    // Positional pairing would give the `swinging` answer here.
+    expect(outOfOrder?.mean).toBeCloseTo(inOrder?.mean as number, 12);
+    expect(outOfOrder?.se).toBeCloseTo(inOrder?.se as number, 12);
+    expect(outOfOrder?.n).toBe(3);
+  });
+
+  it('ignores unmatched seeds and refuses to report on fewer than two', () => {
+    const disjoint = aggregate([
+      result('random', 7, 0.88), result('random', 8, 0.93),
+    ]);
+    expect(paired(armA, disjoint, 'hostRetention')).toBeNull();
+
+    const oneShared = aggregate([
+      result('random', 2, 0.93), result('random', 9, 0.10),
+    ]);
+    expect(paired(armA, oneShared, 'hostRetention'),
+      'one shared seed is one difference, and an SE over one number is not a thing')
+      .toBeNull();
+  });
+
+  it('UNPAIRED remains the gate — the podium blocks on separates(), not paired()', () => {
+    // The whole point of implementing the paired test was to report it. If the
+    // block-splitting ever starts consulting it, the repo has switched to the
+    // more generous of two tests without saying so, and every recorded verdict
+    // silently changes meaning.
+    const fn = /function blocksOf\([\s\S]*?\n}/.exec(body)?.[0] ?? '';
+    expect(fn, 'blocksOf was not found').not.toBe('');
+    expect(fn).toContain('separates(');
+    expect(fn).not.toContain('paired(');
   });
 });
 

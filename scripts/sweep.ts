@@ -39,7 +39,8 @@
  * the metric did.
  */
 
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { getHeapStatistics } from 'node:v8';
 
 import { rank } from '../src/ranking/core/rank.js';
@@ -69,7 +70,7 @@ import type { Candidate, ResolvedParams } from '../src/ranking/core/types.js';
 // Arms
 // ---------------------------------------------------------------------------
 
-type Arm =
+export type Arm =
   | 'shipped'
   | 'ranker_repaired'
   | 'ranker_no_funnel'
@@ -296,7 +297,7 @@ function parseArgs(): Options {
 // Metrics
 // ---------------------------------------------------------------------------
 
-interface Result {
+export interface Result {
   arm: Arm;
   users: number;
   seed: number;
@@ -775,7 +776,7 @@ const HIGHER_IS_BETTER: Record<SeMetric, boolean> = {
   tandemsPerUser: true,
 };
 
-interface Aggregate extends Omit<Result, 'seed'> {
+export interface Aggregate extends Omit<Result, 'seed'> {
   seeds: number;
   /** Standard error of the mean across seeds, per headline metric. */
   se: Record<SeMetric, number>;
@@ -795,7 +796,7 @@ function stderr(xs: number[]): number {
   return Math.sqrt(variance / xs.length);
 }
 
-function aggregate(results: Result[]): Aggregate {
+export function aggregate(results: Result[]): Aggregate {
   const first = results[0] as Result;
   const avg = (pick: (r: Result) => number) => mean(results.map(pick));
   return {
@@ -834,17 +835,74 @@ function aggregate(results: Result[]): Aggregate {
  * SE understates the bar by up to a factor of root two, which over a 0.011 gap
  * is the whole question.
  *
- * Paired seeds would be tighter — every arm runs the same population from the
- * same seed, so the seed effect is common and could be differenced out. This is
- * deliberately the unpaired, more conservative test: the paired version would
- * need the per-seed vectors carried through aggregation, and a separation claim
- * should not rest on the more generous of two available tests.
+ * Paired seeds are tighter — every arm runs the same population from the same
+ * seed, so the seed effect is common and can be differenced out. `paired()`
+ * below now computes it, and the podium prints both.
+ *
+ * THIS ONE REMAINS THE GATE. Every conclusion in DIAGNOSTICS.md, FUNNEL.md and
+ * REPORT.md was drawn against the unpaired bar, and the repo picked the
+ * conservative test on purpose: a separation claim should not rest on the more
+ * generous of two available tests. Having implemented the generous one is not a
+ * reason to start quoting it — the paired number is reported so the cost of that
+ * conservatism is visible, not so it can be spent.
  */
-function separates(a: Aggregate, b: Aggregate, metric: SeMetric, bar = 2): boolean {
+export function separates(a: Aggregate, b: Aggregate, metric: SeMetric, bar = 2): boolean {
   const gap = Math.abs(a[metric] - b[metric]);
   const noise = Math.sqrt(a.se[metric] ** 2 + b.se[metric] ** 2);
   if (noise === 0) return gap > 0;
   return gap > bar * noise;
+}
+
+export interface Paired {
+  /** How many seeds the two arms actually have in common. */
+  n: number;
+  /** Mean of the per-seed differences a - b. */
+  mean: number;
+  /** Standard error of that mean, taken over the DIFFERENCES. */
+  se: number;
+  separates: boolean;
+}
+
+/**
+ * The paired test: difference first, then average. Never the other way round.
+ *
+ * Both arms run the same population from the same seed, so a seed that happens
+ * to generate a sociable town lifts every arm at once. The unpaired test counts
+ * that shared lift as noise in both arms and widens the bar accordingly; the
+ * paired test cancels it, because it subtracts within a seed before averaging.
+ *
+ * The distinction is the entire content of this function, and it is invisible in
+ * the point estimate: `mean(a_i - b_i)` equals `mean(a) - mean(b)` exactly. What
+ * differs is the ERROR BAR. `stderr` here runs over the difference vector, so
+ * two arms sitting 0.02 apart on every single seed have SE 0 and separate, while
+ * the same two means arranged with the per-seed gap swinging between -0.08 and
+ * +0.07 do not. Matching is by SEED NUMBER, not array position, so an arm whose
+ * seeds arrive in a different order is still paired correctly.
+ *
+ * Returns null below two shared seeds — an SE over a single difference is not a
+ * quantity, and printing one would be the error the 2 SE gate exists to prevent.
+ */
+export function paired(
+  a: Aggregate, b: Aggregate, metric: SeMetric, bar = 2,
+): Paired | null {
+  const bBySeed = new Map(b.perSeed.map((r) => [r.seed, r[metric]]));
+
+  const diffs: number[] = [];
+  for (const r of a.perSeed) {
+    const other = bBySeed.get(r.seed);
+    if (other === undefined) continue;        // an unmatched seed contributes nothing
+    diffs.push(r[metric] - other);
+  }
+  if (diffs.length < 2) return null;
+
+  const m = mean(diffs);
+  const se = stderr(diffs);
+  return {
+    n: diffs.length,
+    mean: m,
+    se,
+    separates: se === 0 ? m !== 0 : Math.abs(m) > bar * se,
+  };
 }
 
 const n3 = (x: number) => x.toFixed(3);
@@ -1001,7 +1059,46 @@ function podium(rows: Aggregate[], metric: SeMetric, higherIsBetter = true): str
       `the winner is not determined by this data.`);
   }
 
+  out.push(...adjacentPairs(sorted, metric));
   out.push(...dynamicRange(sorted, metric, higherIsBetter));
+  return out;
+}
+
+/**
+ * Adjacent pairs, tested twice: unpaired (the gate) and paired (reported).
+ *
+ * Printed side by side and labelled, because the interesting case is where they
+ * disagree. A pair that is UNPAIRED TIE / PAIRED SEPARATES is a real effect the
+ * conservative test cannot see, and the honest way to hold that is to show both
+ * and leave the gate where it is — not to quietly switch to whichever one
+ * answers yes.
+ */
+function adjacentPairs(sorted: Aggregate[], metric: SeMetric): string[] {
+  if (sorted.length < 2) return [];
+
+  const out: string[] = [''];
+  out.push('    adjacent pairs   [UNPAIRED is the gate | PAIRED is reported, not governing]');
+
+  for (let i = 0; i + 1 < sorted.length; i++) {
+    const a = sorted[i] as Aggregate;
+    const b = sorted[i + 1] as Aggregate;
+
+    const gap = Math.abs(a[metric] - b[metric]);
+    const bar = 2 * Math.sqrt(a.se[metric] ** 2 + b.se[metric] ** 2);
+    const unpaired = bar > 0
+      ? `gap ${n3(gap)} vs bar ${n3(bar)}  ${gap > bar ? 'SEPARATES' : 'TIE      '}`
+      : `gap ${n3(gap)} vs bar 0.000  ${gap > 0 ? 'SEPARATES' : 'TIE      '}`;
+
+    const p = paired(a, b, metric);
+    const pairedText = p === null
+      ? 'n/a (needs 2+ shared seeds)'
+      : `mean ${p.mean >= 0 ? '+' : ''}${n3(p.mean)} +/-${n3(p.se)} over ${p.n} seeds  ` +
+        `${p.separates ? 'SEPARATES' : 'TIE'}`;
+
+    out.push(`      ${`${a.arm} > ${b.arm}`.padEnd(40)}`);
+    out.push(`        UNPAIRED  ${unpaired}`);
+    out.push(`        PAIRED    ${pairedText}`);
+  }
   return out;
 }
 
@@ -1503,7 +1600,21 @@ async function main(): Promise<void> {
   if (sink) console.log(`wrote ${opts.rowsPath} (${sink.count} per-seed rows)`);
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack : error);
-  process.exit(1);
-});
+/**
+ * Only run when executed as a script.
+ *
+ * `tests/sweep-rigour.test.ts` reads this file as TEXT for its architectural
+ * checks, but the paired test is arithmetic and deserves to be tested as
+ * arithmetic rather than by regex. That means importing `paired()`, and an
+ * unguarded `main()` at module scope would launch a full sweep the moment the
+ * test file imported anything from here.
+ */
+const invokedDirectly = process.argv[1] !== undefined
+  && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1]);
+
+if (invokedDirectly) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack : error);
+    process.exit(1);
+  });
+}
