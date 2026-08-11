@@ -196,6 +196,8 @@ interface Options {
    * recomputed from it.
    */
   rowsPath: string | null;
+  /** §5 — replay the separation verdict at k = 4, 8, all seeds. No re-simulation. */
+  seedCurve: boolean;
   /** §4.2. Re-enables exhaustion at the v1.6 rates. */
   exhaustionOn: boolean;
   /** §4.4. Overrides w_proximity at both ends of the pair. */
@@ -269,6 +271,7 @@ function parseArgs(): Options {
     csvPath,
     mdPath: flag('--md'),
     rowsPath,
+    seedCurve: argv.includes('--seed-curve'),
     exhaustionOn: flag('--exhaustion') === 'on',
     proximityWeight: weight === null ? null : Number(weight),
     proximitySweep: argv.includes('--proximity-sweep'),
@@ -776,6 +779,12 @@ interface Aggregate extends Omit<Result, 'seed'> {
   seeds: number;
   /** Standard error of the mean across seeds, per headline metric. */
   se: Record<SeMetric, number>;
+  /**
+   * The per-seed results this aggregate was computed from, kept rather than
+   * discarded — so a verdict can be replayed over a subset of the seeds without
+   * re-running the simulation.
+   */
+  perSeed: Result[];
 }
 
 /** Standard error of the mean. Returns 0 for fewer than two samples. */
@@ -813,6 +822,7 @@ function aggregate(results: Result[]): Aggregate {
     se: Object.fromEntries(
       SE_METRICS.map((m) => [m, stderr(results.map((r) => r[m]))]),
     ) as Record<SeMetric, number>,
+    perSeed: results.slice(),
   };
 }
 
@@ -930,17 +940,19 @@ function ordered(rows: Aggregate[], metric: SeMetric, higherIsBetter: boolean): 
     higherIsBetter ? b[metric] - a[metric] : a[metric] - b[metric]);
 }
 
-function podium(rows: Aggregate[], metric: SeMetric, higherIsBetter = true): string[] {
-  const out: string[] = [];
-  const sorted = ordered(rows, metric, higherIsBetter);
-
-  out.push(`  ${metric} @ N=${sorted[0]?.users}, ${sorted[0]?.seeds} seeds ` +
-    `(${higherIsBetter ? 'higher' : 'lower'} is better)`);
-
-  // Walk down the order, breaking it into blocks of mutually-unseparated arms.
+/**
+ * Walk the sorted order, breaking it into blocks of mutually-unseparated arms.
+ *
+ * Shared by the podium and by `--seed-curve`, so the seed curve cannot drift
+ * into using a different definition of "the top group" from the one the podium
+ * prints. Gated on `separates()` — the unpaired test — in both.
+ */
+function blocksOf(
+  rows: Aggregate[], metric: SeMetric, higherIsBetter: boolean,
+): Aggregate[][] {
   const blocks: Aggregate[][] = [];
   let block: Aggregate[] = [];
-  for (const row of sorted) {
+  for (const row of ordered(rows, metric, higherIsBetter)) {
     const prev = block[block.length - 1];
     if (prev && separates(prev, row, metric)) {
       blocks.push(block);
@@ -949,6 +961,17 @@ function podium(rows: Aggregate[], metric: SeMetric, higherIsBetter = true): str
     block.push(row);
   }
   if (block.length > 0) blocks.push(block);
+  return blocks;
+}
+
+function podium(rows: Aggregate[], metric: SeMetric, higherIsBetter = true): string[] {
+  const out: string[] = [];
+  const sorted = ordered(rows, metric, higherIsBetter);
+
+  out.push(`  ${metric} @ N=${sorted[0]?.users}, ${sorted[0]?.seeds} seeds ` +
+    `(${higherIsBetter ? 'higher' : 'lower'} is better)`);
+
+  const blocks = blocksOf(rows, metric, higherIsBetter);
 
   let place = 1;
   for (const b of blocks) {
@@ -1036,6 +1059,99 @@ function dynamicRange(
   out.push('      rescaled (random = 0.00, best = 1.00):');
   for (const row of sorted) {
     out.push(`        ${row.arm.padEnd(18)} ${((row[metric] - floor) / span).toFixed(2)}`);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// The seed curve
+// ---------------------------------------------------------------------------
+
+/**
+ * How much of the top-of-ladder verdict is a function of how many seeds were run.
+ *
+ * §2 of REPORT.md reads "the optimum is the configuration already shipping". At
+ * twelve seeds `shipped` separates and that sentence is supported. At four seeds
+ * the same data is a declared four-way tie and the sentence is not. Both numbers
+ * came out of this harness; only one of them was ever printed.
+ *
+ * That is the §D4 failure with the variable renamed. §D4 was a three-seed optimum
+ * that inverted at six, and the response was a 2 SE gate — but a gate answers
+ * "does this separate at the seed count I ran", and says nothing about whether
+ * that seed count was where the answer stopped moving. This prints the verdict as
+ * a function of k so the reader can see whether it has converged or is still
+ * being bought one seed at a time.
+ *
+ * NO RE-SIMULATION. It re-aggregates the per-seed results already computed, over
+ * the first k of them. Re-running would be a different experiment: fresh seeds
+ * would change the answer for reasons unrelated to seed COUNT, which is the one
+ * thing being varied here.
+ */
+function seedCurve(rows: Aggregate[], seeds: number[], metric: SeMetric = 'hostRetention'): string[] {
+  const out: string[] = [];
+
+  // k = 4, 8, and all — deduped and clipped, since an SE needs two samples and
+  // asking for more seeds than were run would silently report the full set twice.
+  const ks = [...new Set([4, 8, seeds.length].filter((k) => k >= 2 && k <= seeds.length))]
+    .sort((a, b) => a - b);
+
+  const users = rows[0]?.users;
+  out.push(`  ${metric} @ N=${users} — verdict as a function of seed count`);
+  out.push('  (re-aggregated from the per-seed results already computed; no re-simulation)');
+  out.push('');
+  out.push('    k    top group (unpaired, 2 SE)                        shipped vs ranker_no_funnel');
+  out.push('    ---  ------------------------------------------------  ---------------------------');
+
+  const topAt = (k: number): Aggregate[] => {
+    const keep = new Set(seeds.slice(0, k));
+    const reAgg = rows
+      .map((row) => row.perSeed.filter((r) => keep.has(r.seed)))
+      .filter((rs) => rs.length > 0)
+      .map((rs) => aggregate(rs));
+    return (blocksOf(reAgg, metric, HIGHER_IS_BETTER[metric])[0] ?? []) as Aggregate[];
+  };
+
+  for (const k of ks) {
+    const keep = new Set(seeds.slice(0, k));
+    const reAgg = rows
+      .map((row) => row.perSeed.filter((r) => keep.has(r.seed)))
+      .filter((rs) => rs.length > 0)
+      .map((rs) => aggregate(rs));
+
+    const top = (blocksOf(reAgg, metric, HIGHER_IS_BETTER[metric])[0] ?? []) as Aggregate[];
+    const label = top.length === reAgg.length
+      ? `NOT IDENTIFIED — all ${reAgg.length} tied`
+      : top.length === 1
+        ? `${top[0]?.arm} alone`
+        : `${top.length}-way tie: ${top.map((r) => r.arm).join(', ')}`;
+
+    const shipped = reAgg.find((r) => r.arm === 'shipped');
+    const noFunnel = reAgg.find((r) => r.arm === 'ranker_no_funnel');
+    let pairVerdict: string;
+    if (!shipped || !noFunnel) {
+      pairVerdict = 'n/a (arm not in run)';
+    } else {
+      const gap = Math.abs(shipped[metric] - noFunnel[metric]);
+      const bar = 2 * Math.sqrt(shipped.se[metric] ** 2 + noFunnel.se[metric] ** 2);
+      pairVerdict = `${separates(shipped, noFunnel, metric) ? 'SEPARATES' : 'TIE      '} ` +
+        `(gap ${n3(gap)} vs bar ${n3(bar)})`;
+    }
+
+    out.push(`    ${String(k).padEnd(3)}  ${label.padEnd(48)}  ${pairVerdict}`);
+  }
+
+  out.push('');
+  const first = ks[0];
+  const last = ks[ks.length - 1];
+  if (first !== undefined && last !== undefined && first !== last) {
+    const a = topAt(first).length;
+    const b = topAt(last).length;
+    out.push(a === b
+      ? `    The top group is the same size at k=${first} and k=${last}. ` +
+        'The verdict is stable over this range of seed counts.'
+      : `    The top group goes from ${a} arms at k=${first} to ${b} at k=${last}. ` +
+        'THE VERDICT IS SEED-COUNT DEPENDENT — it is a claim about that many seeds, ' +
+        'not about the ladder.');
   }
   return out;
 }
@@ -1330,6 +1446,16 @@ async function main(): Promise<void> {
       for (const line of dynamicRange(ordered(group, metric, dir), metric, dir)) {
         console.log(line);
       }
+      console.log('');
+    }
+  }
+
+  if (opts.seedCurve) {
+    console.log('=== SEED CURVE — is the verdict converged, or still being bought? ===');
+    for (const users of opts.sizes) {
+      const group = aggregates.filter((x) => x.users === users);
+      if (group.length < 2) continue;
+      for (const line of seedCurve(group, opts.seeds)) console.log(line);
       console.log('');
     }
   }

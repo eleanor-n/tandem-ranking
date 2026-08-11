@@ -73,6 +73,12 @@ demand layer and the session penalties are earning their place; the funnel and
 the interest model are not. **The optimum is the configuration already
 shipping** — a confirmation, not a change.
 
+**That verdict is seed-count dependent**: `shipped` separates from
+`ranker_no_funnel` at 12 seeds, but the same data read at the first 4 seeds is a
+declared four-way tie, so this is a claim about 12 seeds rather than about the
+ladder — run `npm run sweep -- --seed-curve` to print the verdict at k = 4, 8
+and all.
+
 ## 3. Is distance overweighted? The simulator cannot say — see §4
 
 Two corrections live in this section, and the second cancels the first.
