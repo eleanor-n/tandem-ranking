@@ -22,6 +22,10 @@ import { retrieve } from './retrieval.js';
 import { selectReason } from './explain.js';
 import { mulberry32, seedFor } from './random.js';
 import { computeRegime, resolveParams } from './regime.js';
+import { RANKER_ENABLED, applyShipGate } from './shipping.js';
+import { EMPTY_SESSION } from './session.js';
+import { SNAPSHOT_VERSION, buildSnapshotApp } from './snapshot.js';
+import type { SnapshotApp } from './snapshot.js';
 import { CONSTANTS } from './constants.js';
 import type {
   ActivityId,
@@ -31,6 +35,8 @@ import type {
   RankResult,
   ResolvedParams,
   RetrievalSource,
+  ScoreSnapshot,
+  ScoredCandidate,
   SlateCard,
 } from './types.js';
 
@@ -75,7 +81,15 @@ export function rank(
       null,
     ).regime;
 
-    const params = resolveParams(regime);
+    // THE ONLY PLACE THE SHIP GATE IS READ.
+    //
+    // A parameter transformation, not a branch — see shipping.ts for why. The
+    // shelved ranker is the live pipeline with different numbers, which is the
+    // only kind of dormant code that still works when you wake it up.
+    const params: ResolvedParams = {
+      ...applyShipGate(resolveParams(regime)),
+      ...(options.paramsOverride ?? {}),
+    };
 
     const interest = computeInterestState(
       input.interestEvents, input.now, input.viewer.userId,
@@ -90,7 +104,9 @@ export function rank(
       input.viewer, retrieved.candidates, interest, input.now, params,
     );
 
-    const { cards, relaxations } = assembleSlate(scored, rng, params, deckSize);
+    const { cards, relaxations } = assembleSlate(
+      scored, rng, params, deckSize, input.sessionShown ?? EMPTY_SESSION,
+    );
 
     const slateCards: SlateCard[] = cards.map((sc, position) => ({
       activityId: sc.candidate.activityId,
@@ -109,6 +125,10 @@ export function rank(
         degraded: false,
         computedAt: input.now,
       },
+      // Always populated, debug or not. Instrumentation is the deliverable, not
+      // a debugging affordance — and the whole feature set is here, including
+      // every feature the shipped ordering ignored.
+      snapshots: cards.map((sc) => snapshotOf(sc, regime, input.snapshotApp)),
     };
 
     // The numeric internals are opt-in and never reachable from a UI type.
@@ -132,13 +152,48 @@ export function rank(
 }
 
 /**
+ * One impression's worth of telemetry.
+ *
+ * Everything computed, whether or not it was used. Resolved parameters are
+ * omitted on purpose: they are a pure function of (`algo`, `regime`), so
+ * writing them onto every row would duplicate onto ~thousands of impressions
+ * something already reconstructable from a git tag.
+ */
+function snapshotOf(
+  sc: ScoredCandidate,
+  regime: number,
+  app?: Partial<SnapshotApp> | null,
+): ScoreSnapshot {
+  return {
+    v: SNAPSHOT_VERSION,
+    computed: {
+      features: sc.features,
+      funnel: sc.funnel,
+      regime,
+      rankerEnabled: RANKER_ENABLED,
+      algo: CONSTANTS.instrumentation.algoVersion,
+    },
+    // Always written, always complete, even when the caller supplies nothing.
+    // An un-integrated row is still a well-formed row, which is what lets a
+    // later reader tell "unavailable" from "predates the field".
+    app: buildSnapshotApp(app),
+  };
+}
+
+/**
  * The floor. Proximity-ordered, canned category reason lines, no interest model
  * involved. Uses nothing that can throw.
+ *
+ * Emits no snapshots: there are no features here to snapshot, and writing empty
+ * ones would put rows in the training set that look like measurements and are
+ * not. A degraded deck is visible in the data as impressions with a null
+ * `score_snapshot`, which is exactly what it is.
  */
 function fallbackResult(input: RankInput, deckSize: number): RankResult {
   const ordered: Candidate[] = proximityOrder(input.candidates).slice(0, deckSize);
 
   return {
+    snapshots: [],
     slate: {
       userId: input.viewer.userId,
       sessionId: input.sessionId,

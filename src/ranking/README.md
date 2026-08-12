@@ -17,14 +17,23 @@ core/
   features.ts    proximity, timeFit, hostReliability…  the feature dictionary
   score.ts       P_join x P_accept x P_complete x R_repeat
   retrieval.ts   source quotas, candidate assembly     §3.1
-  slate.ts       diversity, fairness, explore          §3.3
+  slate.ts       session penalties, fairness, explore  §3.3
+  session.ts     what this session has already shown   v1.7 §3.2
+  checkin.ts     who to ask, and when                  v1.7 §2.2
+  shipping.ts    THE ship gate. One flag, one reader   v1.7 §3.3
   explain.ts     reason-line selection                 §5
   rank.ts        the orchestrator — the only public entry point into core/
 
 adapter/
-  supabase.ts    the ONLY file that knows Supabase exists
-  index.ts       the public API the app calls
+  supabase.ts        the ONLY file that knows Supabase exists
+  instrumentation.ts the buffered impression writer    v1.7 §2.1
+  index.ts           the public API the app calls
 ```
+
+> **Read [`../../SCHEMA.md`](../../SCHEMA.md) before touching the adapter or a
+> migration.** It records what the live database actually contains and overrides
+> the v1.5 and v1.6 migrations wherever they disagree — which is in three
+> places, one of which silently disabled a trigger for months.
 
 ## Using it
 
@@ -45,17 +54,47 @@ const { slate } = await ranking.getDeck(userId, sessionId);
 // slate.cards -> render. There is no score on them, by construction.
 ```
 
+Wire the lifecycle once, at startup and on foreground/background:
+
+```ts
+await ranking.instrumentation.restore();           // recover a killed buffer
+ranking.instrumentation.startSession();            // on every app foreground
+// ...
+await ranking.instrumentation.appBackgrounded();   // on background
+```
+
 Then, as the user moves through the deck:
 
 ```ts
-await ranking.logImpression({ userId, activityId, hostId, deckPosition, source, features });
-await ranking.logEvent({ userId, eventType: 'expand', activityId });
-await ranking.logEvent({ userId, eventType: 'im_in', activityId, deckPosition });
+ranking.instrumentation.recordDeck(userId, result);          // one row per card
+ranking.instrumentation.record({ userId, eventType: 'expand', activityId });
+ranking.instrumentation.record({ userId, eventType: 'im_in', activityId, deckPosition });
 ```
 
-`impression` should carry `features` — that snapshot is the training data for
-v2. Every impression stores the feature vector, and the downstream events become
-the labels. Skip it and v2 has nothing to learn from.
+Note what these are **not**: they are not `await`ed and they do not return
+promises. Discover shows one card at a time, so a promise on this path becomes a
+network round-trip per swipe. `record()` is synchronous, cannot throw, and
+buffers; batches leave on a timer, on backgrounding, and at 20 events. A failed
+log is invisible to the user by design.
+
+`recordDeck` carries `result.snapshots`, which is the **entire feature set** —
+including every feature the shipped ordering ignores. That is the point of the
+v1.7 build: features cost microseconds, unlogged history is unrecoverable, and
+"does `timeFit` predict anything" must not be a question whose answer starts with
+"run it for three months first".
+
+Once per app open, ask what the user owes:
+
+```ts
+const [pending] = await ranking.getPendingCheckIns(userId);
+if (pending) {
+  // Eleanor's copy and UI. This layer only knows who and when.
+  await ranking.submitCheckIn({ ...pending, positive: answer });
+}
+```
+
+There is no `skipCheckIn`. A skip writes nothing and comes back next time — a
+person who did not answer is not a person who said no.
 
 ## The data port
 
@@ -70,7 +109,290 @@ not pin a client version against the host app's. Column names are collected in
 one `COLUMNS` object at the top of the file; reconcile them with the real schema
 before shipping.
 
-## Density adaptation (v1.6)
+## Term classification (v1.8 §1.1)
+
+**Read this before adding anything to the score.** It is the one piece of this
+module that is about arithmetic rather than product, and getting it wrong is not
+visible in any single function.
+
+A ranker in a two-sided marketplace does two jobs:
+
+| | |
+|---|---|
+| **relevance** | which of these is best *for this viewer* — per-viewer |
+| **allocation** | who gets seen at all, across all viewers — population-level |
+
+A product of per-viewer scores can only do the first. Any factor in that product
+whose value does not depend on the viewer performs allocation **as an invisible
+side effect**: every client independently sorts the same items upward, because
+every client was handed the same preference order. Nobody decides this. It falls
+out of the multiplication.
+
+v1.7 §D3 measured the consequence — host-attention Gini 0.931, losing to
+`random` on host retention, and *deck relevance lower than with the terms
+removed*. That last part is what settles it. It was never fairness versus
+relevance; the terms were displacing wanted cards **and** concentrating
+attention, simultaneously.
+
+### The table
+
+| term | class | treatment |
+|---|---|---|
+| `categoryAffinity` | per-viewer | summed in P_join |
+| `intentMatch` | per-viewer | summed in P_join |
+| `proximity` | per-viewer | summed in P_join |
+| `timeFit` | per-viewer | summed in P_join |
+| `socialContext` | pairwise | summed in P_join |
+| `rhythmOverlap` | pairwise | multiplier, via `R_repeat` |
+| `graphAffinity` | pairwise | stub, weight 0 |
+| `acceptLikelihood` | pairwise *(was global-quality)* | `hostRank^ρ × (1 + pickiness × viewerDeviation)` — §1.2 |
+| `hostReliability` | global-quality | only *inside* `acceptLikelihood`, rank-normalised and dampened |
+| `completionPrior` | global-quality | **gate**, not multiplier — §1.3 |
+| `freshness` | global-quality | folded into the gate |
+| `repeatableContext` | global-quality | logged; no longer read by the score |
+| `repeatableContextRank` | global-quality | **dampened multiplicand** — provisional, §1.4 |
+| `exposureBoost` | global-allocation | multiplier — allowed and load-bearing |
+| `demandMultiplier` | global-allocation | multiplier — allowed and load-bearing |
+
+### Why the rule is not "no global multipliers"
+
+`exposureBoost` and the demand terms are viewer-independent too, and they are
+fine. They *are* the allocation job, done on purpose, by terms whose entire
+content is population state — how many impressions has this had, how full is it,
+how soon is it. Banning them would ban the only machinery that pushes back on
+concentration.
+
+The rule is:
+
+> **No global *quality* multipliers.**
+
+A global term ranking items by how good they are, multiplied into a per-viewer
+product, is the defect. A global term ranking items by how under-served they are
+is the corrective. They are opposites, and `TermClass` in
+[`core/classification.ts`](core/classification.ts) is what lets the build tell
+them apart.
+
+### How it is enforced
+
+`score.ts` declares `MULTIPLICATIVE_LEAVES` — the *leaf* terms that enter the
+product, not the composites, because a composite hides what it is made of and
+hiding is how `completionPrior` became a global quality multiplier without
+anyone choosing that. `tests/classification.test.ts` then:
+
+- fails if any feature in `FeatureVector` is unclassified
+- fails if a declared leaf is `global_quality`
+- cross-checks the declared list against a scan of `score.ts`, so it cannot
+  drift from the expression it claims to describe
+- asserts P_join *sums* its constituents rather than multiplying them
+
+**The guard is armed.** Four multiplied leaves were `global_quality` through
+v1.7; there are now none, so `score.ts` calls
+`assertNoGlobalQualityMultipliers` at module load. A future edit that multiplies
+in a quality score, a trust score, or a verified-host bonus crashes on import
+rather than shipping.
+
+### The four ways a term can reach the deck
+
+| list | admits | why it is safe |
+|---|---|---|
+| `PJOIN_SUMMANDS` | per-viewer, pairwise | a weighted **sum** of per-viewer terms is per-viewer |
+| `MULTIPLICATIVE_LEAVES` | per-viewer, pairwise, global-**allocation** | either no consensus, or consensus that *spreads* attention |
+| `GATE_TERMS` | global-quality | a **sort key** cannot compound — it splits the deck into blocks and orders within them |
+| `DAMPENED_MULTIPLICANDS` | global-quality, rank-normalised, exponent < 1 | **provisional.** See below |
+
+⚠️ `DAMPENED_MULTIPLICANDS` should be viewed with suspicion. Damping does not
+change what a term *depends on* — a category's repeatability is the same fact
+for every viewer no matter what power it is raised to, so the term still creates
+consensus, just less of it. The category exists because "dampen it" and "drop
+it" are both defensible and only a measurement separates them, **not** because
+dampening launders a global term into a safe one. §3.4 runs both arms; if
+keeping it does not pay, the answer is `repeatableContextWeight: 0`, not a
+smaller exponent.
+
+## What is on, and what is off (v1.7)
+
+**The ranker is shelved, not deleted.** `RANKER_ENABLED` in `core/shipping.ts`
+is `false`. What ships is:
+
+```
+deck order = proximity  x  demand balancing  x  within-session penalties
+```
+
+Everything else stays in the repo, stays tested, and keeps computing on every
+deck — its full feature set goes into `ranking_events.score_snapshot` on every
+impression. It just does not order anything.
+
+| | what | reactivate by |
+|---|---|---|
+| ✅ | proximity ordering | — |
+| ✅ | demand balancing (urgency, overflow) | — |
+| ✅ | within-session category/host penalties | — |
+| ✅ | impression floor | — |
+| ✅ | **impression logging, full feature set** | — |
+| ✅ | check-in data path | — |
+| ⬜ | interest weights in P_join | `RANKER_ENABLED = true` |
+| ⬜ | explore epsilon, fresh-host quota, affinity retrieval | `RANKER_ENABLED = true` |
+| ⬜ | funnel factors (P_accept x P_complete x R_repeat) | `RANKER_ENABLED = true`, but read `DIAGNOSTICS.md` §D3 first — they are the most damaging thing measured in this build |
+| ⬜ | exhaustion (§3) | check-in data exists in `tandem_feedback` |
+| ⬜ | graph consumption | implement `graphAffinity`, then see below |
+| ⬜ | intent gap (§1.5), transition detection (§1.6), learned weights | out of scope |
+
+### Why the gate is a parameter override and not an `if`
+
+The obvious implementation is a branch at the top of `rank()`:
+
+```ts
+if (!RANKER_ENABLED) return proximityDeck(input)   // DON'T
+```
+
+That is a second code path, and second code paths rot. The shipped one gets the
+bug fixes, the shelved one quietly stops working, and the day someone flips the
+flag they discover the ranker broke four months ago. It is also the same mode
+switch that the v1.6 density architecture spent its whole design avoiding,
+reintroduced one level up.
+
+So `applyShipGate()` transforms the resolved parameters instead: P_join
+collapses to a proximity delta, quotas collapse to proximity, `exploreEpsilon`
+goes to 0, and `funnelExponent` goes to 0 so `P_accept^0 = 1`. One pipeline, one
+set of modules, one order of operations — the shelved ranker is the live path
+with different numbers, which is the only kind of dormant code that still works
+when you wake it up.
+
+The old ranker tests still run against it every commit, by handing back the
+ungated parameters:
+
+```ts
+rank(input, { paramsOverride: resolveParams(regime) })   // wake the ranker up
+```
+
+Two architectural tests hold the line: only `rank.ts` may read the flag, and no
+scoring module may import `shipping.ts`.
+
+## Instrumentation (v1.7 §2.1)
+
+`ranking_events` is **the** impression table. `feed_impressions` is deprecated
+(zero rows, a `DEPRECATED` table comment, and a test that fails if any source
+file names it) — two tables with overlapping jobs is how a training set ends up
+split across schemas with no way to join it afterwards.
+
+Every card shown writes one row: `user_id`, `activity_id`, `host_id`,
+`event_type`, `deck_position`, `session_id`, `source`, `score_snapshot`. Also
+logged: `expand`, `im_in`, `accept`, `decline`, `complete`, `checkin_yes`,
+`checkin_no`.
+
+`score_snapshot` carries `{ v, features, funnel, regime, rankerEnabled, algo }`.
+Resolved parameters are deliberately **not** stored per row: they are a pure
+function of `(algo, regime)`, so writing them would duplicate onto thousands of
+impressions something already reconstructable from a git tag.
+
+`session_id` is client-generated, one per app foreground period. There is no
+server-side session concept and this build does not add one — a session is "the
+stretch of cards someone looked at in one sitting", which only the client can
+observe.
+
+The writer's three rules, in priority order:
+
+1. **Never surface an error.** A failed log is invisible. `onError` is for a
+   developer console and nothing else reads it.
+2. **Never block a render.** Everything except `flush()` is synchronous.
+3. **Lose events rather than grow without bound.** At 500 buffered events the
+   oldest are dropped and counted; a batch that fails three times is abandoned,
+   because retrying a poison batch forever is how a logging layer becomes an
+   outage. `instrumentation.health()` reports both.
+
+Crash persistence is opt-in via an injected `storage` (AsyncStorage satisfies
+the interface as-is) and coalesced on a debounce, so it does not put a storage
+write back on the swipe path.
+
+## Within-session penalties (v1.7 §3.2)
+
+```
+S_final x= categoryPenalty ^ shownThisSession(category)
+S_final x= hostPenalty     ^ shownThisSession(host)
+```
+
+These replaced `maxPerCategory` and `maxPerHost`, which were **mis-specified,
+not mistuned**. Every slot rule in v1.6 was a fraction of a deck of 8 — but
+Discover shows one card at a time, the user keeps tandeming until they close the
+app, and the pool does not reset. "At most 2 coffees per 8" never binds in a
+three-card session and means nothing at all in a forty-card one. It is a quota
+over a window that does not exist.
+
+Three properties a quota could not have:
+
+- it degrades gracefully at **any** session length, with no cliff
+- it costs no reserved slot, so nothing is displaced
+- it is monotone: the fourth coffee is worse than the third rather than
+  forbidden where the third was free
+
+And one thing it deleted: **the relaxation ladder**. That machinery existed
+because a hard cap could make the deck come out short. A penalised card is still
+a card, so the failure mode stopped existing rather than being handled.
+"Constraints reorder, they never shorten" now holds structurally.
+
+The counters live in the ranking client, keyed by `sessionId` and evicted
+oldest-first, so callers do not have to thread them. Call `resetSession(id)` on
+foreground if you reuse session ids.
+
+⚠️ **Both constants are `UNMEASURED` and must not be tuned yet.** Nobody knows
+the median session length. `feed_impressions` is empty and "3 cards" is derived
+from looking at the UI, not from measuring anyone. Tuning against that guess
+would launder the guess into a measurement. Set them from real `ranking_events`
+data after the beta — which is what this whole build is for.
+
+## The check-in (v1.7 §2.2)
+
+Data path only. Copy and UI belong elsewhere; nothing here renders anything, the
+answer is never shown to the rated user, and it never becomes a score.
+
+- **when** — the activity ended, plus `minElapsedHours` (2). Asking on the walk
+  home gets an answer about the last five minutes.
+- **who** — exactly one counterpart, because `tandems` is strictly pairwise.
+- **how many** — one per app open. Five on launch is an interrogation, and the
+  second answer is already worse than the first.
+- **until when** — `eligibilityWindowDays` (7), from the activity's end. Past
+  that it is dropped, not queued. Recall on a three-week-old tandem is poor, and
+  a label answered from a vague memory is worse than no label, because nothing
+  downstream can tell the two apart.
+- **order** — **most recent first** (reversed in v1.9). A check-in decays in
+  usefulness, and with one prompt per app open only one property is available:
+  queue fairness or answer quality. Answer quality wins. The starvation risk that
+  argued for oldest-first is gone anyway — with the window above, nothing can sit
+  in the queue long enough to be starved.
+- **skip** — **soft** (v1.9.1). A first skip sets `retry_after` and the prompt
+  returns once more after `skipRetryDays` (5); a second retires it permanently.
+  One dismissal is ambiguous — a mis-tap, a bad moment — and labels are the
+  scarcest resource here, so one should not cost one permanently. Two is an
+  answer.
+
+  A skip is **never** a negative: its own table, no `rated_id`, no polarity, no
+  `interest_events` row. A person who did not answer is not a person who said no,
+  and storing it as one teaches people that the honest answer has consequences,
+  after which the signal is worthless.
+
+Writes `tandem_feedback` (already per-pair — no migration needed) and mirrors
+into `interest_events`, where `checkin_yes` carries weight 1.2 at a 120-day
+half-life, the highest and longest in the table. **`checkin_yes` / `checkin_no`
+are canonical — see SCHEMA.md §6**, which is the authority and explains why a
+wrong slug fails silently at zero weight rather than erroring.
+
+## Density adaptation (v1.6) — COLLAPSED IN v1.8 §2
+
+> ⚠️ **Every scaled pair below is now a single constant.** Twelve pairs were
+> declared; exactly one was ever swept, and that sweep found the primary metric
+> flat in it. `resolveParams` is an identity — it accepts a regime, validates
+> it, and ignores it.
+>
+> Shelved, not deleted: coverage, EWMA, hysteresis, `resolve()` and `Scaled<T>`
+> are all intact and still tested. Reactivating one pair is turning one constant
+> back into `{ village, city }` and putting `resolve(pair, t)` back on one line.
+>
+> **Reactivation condition:** a swept pair that beats its collapsed constant at
+> 6+ seeds and 2 standard errors. See [`DIAGNOSTICS.md` §C](../../DIAGNOSTICS.md).
+>
+> The section below documents the machinery and the reasoning, both of which
+> still stand. The two-column tables now record what the pairs *were*.
+
 
 The ranker's objective changes with density, and it does so **continuously**.
 There is one algorithm; there is no mode switch, no flag, and no
@@ -149,12 +471,17 @@ anything the spec says must scale also fails the build.
 | `exploreEpsilon` | 0.0 | 0.15 | exposure is already guaranteed by pool exhaustion |
 | `quotas.random` | 0.0 | 0.05 | |
 | `quotas.fresh_host` | 0.0 | 0.10 | becomes ordering, not a slot — see §2.3 |
-| `maxPerCategory` | 8 | 2 | you cannot diversify a pool that is not diverse |
-| `maxPerHost` | 3 | 1 | |
+| `categoryPenalty` | 0.95 | 0.80 | ⚠️ UNMEASURED. v1.7 §3.2 — replaced `maxPerCategory` |
+| `hostPenalty` | 0.85 | 0.60 | ⚠️ UNMEASURED. replaced `maxPerHost` |
 | `demandWeight` | 0.50 | 0.10 | filling posts IS the objective at village scale |
 | `overflowPenalty` | 0.6 | 0.2 | a wasted slot is expensive when there are few |
-| `exhaustionRate` | 0.35 | 0.15 | running out of new faces is the village failure mode |
+| `exhaustionRate` | **0.0** | **0.0** | ⚠️ DISABLED in v1.7 — see below |
 | `noveltyBoost` | 1.0 | 2.5 | novelty is unmeasurable on three events |
+
+Every one of these is now **continuous**. v1.6's `maxPerCategory` / `maxPerHost`
+were integer counts that stepped by 1 and were the one legitimate discontinuity
+in the system; replacing them with multiplicative penalties emptied the
+continuity test's exemption list.
 
 P_join weights are renormalised to sum 1 **after** interpolation, at every point
 on the continuum, asserted at load and in tests. The declared columns do not
@@ -186,9 +513,20 @@ so a post whose data failed to load cannot be boosted as if it were empty.
 Exhaustion is *gated* by `repeatAffinity`, not merely offset by it: a host you
 have enthusiastically said yes to twice has `repeatAffinity ≈ 1`, so the
 suppression vanishes entirely. It has to — becoming a habit with someone is the
-whole point. ⚠️ `repeatAffinity` needs check-in data that does not exist yet, so
-it is currently 0.5 for every pairing and exhaustion is a uniform damper on all
-repeats, good ones included. That is the highest-priority gap in this build.
+whole point.
+
+⚠️ **Exhaustion is DISABLED in v1.7** — `exhaustionRate` is 0 at both ends.
+`repeatAffinity` needs check-in data and `tandem_feedback` has zero rows, so it
+returns 0.5 for every pairing and the term damps good repeats and bad repeats
+identically. Repeat-tandem rate is the long-run north star; a uniform damper on
+the thing you are optimising for is worse than no damper.
+
+**Reactivation condition, stated in one place:** check-in data exists in
+`tandem_feedback`. When it does, copy `CONSTANTS.scaled.exhaustionRateWhenReactivated`
+(the v1.6 tuned values, parked rather than deleted) back over `exhaustionRate`
+and re-run the sweep. The code and all 19 demand tests stay live in the
+meantime, running at the reactivation rates, so it still works on the day you
+flip it.
 
 ### Where transition detection will interact
 
@@ -231,9 +569,10 @@ That is exactly how the `graph` source is currently shipping.
 
 The graph is written but never read in v1.5. Three things are already in place:
 
-- the `graph_edges` table, populated from day one by an `AFTER UPDATE` trigger on
-  tandem completion, canonical ordering `user_a < user_b`, weight incremented per
-  shared completion;
+- the `graph_edges` table, now a **derived aggregate** over
+  `tandems WHERE status = 'completed'`, rebuilt from scratch by
+  `rebuild_graph_edges()` / `npm run graph:rebuild`. Canonical ordering
+  `user_a < user_b`, weight = shared completed tandems;
 - `graphAffinity()` in `core/features.ts`, with its final signature, returning `0`;
 - the `graph` retrieval source in `core/retrieval.ts`, returning `[]`.
 
@@ -252,8 +591,10 @@ To switch it on:
    ranking one — it reveals a third party's participation to someone who was
    not there.
 
-The migration and the trigger are already accumulating history, so the day you
-turn it on there is something to turn it on to.
+The history can never be missing, because `graph_edges` is recomputable from
+`tandems` at any time. That is a strictly better position than v1.5's, where a
+trigger targeting a table that does not exist silently never fired and the
+table sat empty for months with nothing to notice.
 
 ## Guarantees the tests enforce
 
@@ -293,6 +634,36 @@ population and seed, so results are comparative.
 Read `scripts/simulate.ts` before trusting a number from it. Its user model is a
 guess, and where the guess is wrong the metric is wrong — see the note in
 `INFERENCES.md` about what the simulator does not model.
+
+## How to read the diagnostics
+
+[`DIAGNOSTICS.md`](../../DIAGNOSTICS.md) is four pre-registered hypotheses with
+what was predicted, what was observed, and whether it held. Read it in this
+order:
+
+1. **The metric-change note first.** Repeat rate is a ratio and can be won by
+   shrinking the pool; host retention is a count and cannot. If you read the
+   tables without that, the arms look like they swapped places for no reason.
+2. **§D3 before §D1.** §D3 is the strongest result in the build and it is
+   against the ranker, so by the standing caveat it is the one to believe.
+3. **Both retention columns.** The headline saturates in this simulator. The
+   `retention after empty` column — the same question conditioned on the first
+   post getting nobody — is where the separation is.
+
+Every configuration is applied through `RankOptions.paramsOverride` and the
+command is printed above each table, so any row can be reproduced without
+editing a constant. That is deliberate: v1.6's decomposition was run by editing
+`constants.ts` and reverting, which leaves no trace and is indistinguishable
+from tuning.
+
+Re-run everything with:
+
+```bash
+npm run sweep -- --md sweep-results.md --csv sweep-results.csv
+npm run sweep -- --exhaustion on            # §D2
+npm run sweep -- --sizes 600 --funnel-exponent 0    # §D3 ablation
+npm run sweep -- --proximity-sweep          # §D4
+```
 
 ## Things that are deliberately not here
 

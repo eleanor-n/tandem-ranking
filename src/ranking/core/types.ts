@@ -6,6 +6,13 @@
  * Time enters the system exclusively as an injected `now: Epoch` parameter.
  */
 
+import type { SessionShown } from './session.js';
+import type { SnapshotApp, SnapshotComputed } from './snapshot.js';
+
+export type { SnapshotApp, SnapshotComputed } from './snapshot.js';
+
+export type { SessionShown } from './session.js';
+
 // ---------------------------------------------------------------------------
 // Scalars
 // ---------------------------------------------------------------------------
@@ -246,6 +253,28 @@ export interface Viewer {
   seenHostIds: UserId[];
   /** Viewers the host trusts — drives auto-accept. */
   trustedByHostIds: UserId[];
+
+  // -------------------------------------------------------------------------
+  // Requester reputation (v1.8 §1.2)
+  //
+  // What a HOST would want to know about the person asking. All optional and
+  // all prior-smoothed downstream, so a brand-new viewer lands at exactly
+  // neutral rather than at zero — a cold-start penalty on P_accept would mean
+  // the deck punishes you for not having used the app yet.
+  // -------------------------------------------------------------------------
+
+  /** Completed tandems, either side. Derived from `tandems` (SCHEMA.md §1). */
+  completedTandems?: number;
+  /** Requests this viewer had accepted. The denominator for follow-through. */
+  acceptedRequests?: number;
+  /** Accepted, then did not happen. The numerator hosts actually care about. */
+  noShows?: number;
+  /**
+   * Categories the viewer has posted in themselves. Hosts accept people who do
+   * this kind of thing — and unlike the other three, this one VARIES ACROSS
+   * CARDS, which is what lets it affect ordering rather than just level.
+   */
+  postedCategories?: CategorySlug[];
 }
 
 // ---------------------------------------------------------------------------
@@ -282,16 +311,57 @@ export interface ResolvedParams {
   /** Retrieval quotas as fractions of the deck, summing to 1. */
   quotas: Record<RetrievalSource, number>;
   exploreEpsilon: number;
-  maxPerCategory: number;
-  maxPerHost: number;
+  /**
+   * Within-session diversity penalties (v1.7 §3.2), in (0, 1]. These REPLACE
+   * the v1.6 `maxPerCategory` / `maxPerHost` slot caps, which were fractions of
+   * a deck of 8 in a product that shows one card at a time and never resets the
+   * pool — a quota over a window that does not exist.
+   *
+   *   S_final x= categoryPenalty ^ shownThisSession(category)
+   *   S_final x= hostPenalty     ^ shownThisSession(host)
+   */
+  categoryPenalty: number;
+  hostPenalty: number;
   /** delta in S x (1 + delta * urgency) — demand balancing (§2). */
   demandWeight: number;
   /** sigma in S x (1 - sigma * overflow) — already-full penalty (§2.2). */
   overflowPenalty: number;
+  /**
+   * P_complete below this sorts a card to the tail (v1.8 §1.3). Zero disables
+   * the gate entirely, which is what the ship gate does — a completion floor is
+   * ranker machinery and the shipped order is proximity x demand x session
+   * penalties.
+   */
+  completionFloor: number;
+  /**
+   * Weight on the rank-normalised `repeatableContext` term inside R_repeat
+   * (v1.8 §1.4). ZERO DROPS IT — which is one of the two arms §3.4 runs.
+   */
+  repeatableContextWeight: number;
+  /**
+   * Damping exponent on that rank (v1.8 §1.4). 0 flattens it to a constant,
+   * 1 is the raw rank. Same treatment as the host term in §1.2, for the same
+   * reason: a global term should be an advantage, not a monopoly.
+   */
+  repeatableContextDamping: number;
+  /**
+   * rho — the damping exponent on the rank-normalised host term inside
+   * P_accept (v1.8 §1.2). 0 flattens the host term entirely, 1 is the raw rank.
+   * Resolved rather than constant so §3.3 can sweep it, which is the
+   * measurement that decides whether §1.2 is the right repair.
+   */
+  hostAcceptDamping: number;
   /** Rate in exhaustion = 1 - exp(-rate * completedTogether) (§3). */
   exhaustionRate: number;
   /** beta in salience = interest x (1 + beta * novelty) (§1.4). */
   noveltyBoost: number;
+  /**
+   * Exponent on P_accept, P_complete and R_repeat (v1.7 §3.3). 1 is the full
+   * funnel; 0 raises each to the identity, leaving S = P_join. A number rather
+   * than a flag so the ship gate needs no branch and the continuity test covers
+   * it like everything else.
+   */
+  funnelExponent: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +378,14 @@ export interface FeatureVector {
   hostReliability: Unit;
   acceptLikelihood: Unit;
   completionPrior: Unit;
+  /** Raw category repeatability class. LOGGED, no longer read by the score. */
   repeatableContext: Unit;
+  /**
+   * `repeatableContext` rank-normalised against the categories present in the
+   * pool (v1.8 §1.4). This is what `R_repeat` reads. Equals the raw value when
+   * no population context was supplied.
+   */
+  repeatableContextRank: Unit;
   rhythmOverlap: Unit;
   freshness: Unit;
   /** STUB in v1.5: always 0. See features.ts → graphAffinity. */
@@ -331,12 +408,66 @@ export interface FunnelScore {
   overflow: number;
   /** How worn out this viewer/host pairing is, in [0, 1] (§3). */
   exhaustion: number;
+  /**
+   * True when P_complete fell below `completionFloor` (v1.8 §1.3).
+   *
+   * An ORDERING key, not a filter: these cards sort to the tail of the deck and
+   * remain reachable. Carried on the score rather than folded into it because
+   * folding it in would make it a multiplier again — a global-quality one,
+   * which is the thing §1.3 exists to stop.
+   */
+  belowCompletionFloor: boolean;
 }
 
 export interface ScoredCandidate {
   candidate: Candidate;
   features: FeatureVector;
   funnel: FunnelScore;
+}
+
+/**
+ * What gets written to `ranking_events.score_snapshot` on every impression.
+ *
+ * THE POINT OF THE v1.7 BUILD. Every feature the system can compute is recorded
+ * here, **including the ones the shipped ordering ignores** — the whole shelved
+ * ranker's feature set is computed on every deck and logged, while only
+ * proximity, demand and the session penalties decide the order.
+ *
+ * That asymmetry is deliberate and it is cheap. Features cost microseconds;
+ * unlogged history is unrecoverable. Without this, the day someone wants to know
+ * whether `timeFit` predicts anything, the answer is "run the experiment for
+ * three months first".
+ *
+ * Resolved parameters are NOT stored per row — they are a pure function of
+ * (`algo`, `regime`), so storing them would be ~16 numbers duplicated onto every
+ * impression to record something already reconstructable from a git tag.
+ */
+export interface ScoreSnapshot {
+  /**
+   * Schema version of this object. Bump it when the shape changes, and never
+   * reinterpret an older `v` under newer rules — a training set silently
+   * spanning two feature definitions is worse than one that spans none.
+   *
+   * See `snapshot.ts` for the changelog, and for why v2 is not v1.
+   */
+  v: number;
+
+  /**
+   * Everything THIS MODULE calculates. Always fully populated.
+   *
+   * v1 carried these five fields at the top level. They moved under `computed`
+   * in v2 so that `app` could sit beside them without the two being
+   * confusable — a missing key here is a bug in this module, while a missing
+   * key in `app` is an integration that has not happened yet.
+   */
+  computed: SnapshotComputed;
+
+  /**
+   * Context only the parent app has: filters, entry point, app version.
+   * Every key always present, `null` until populated. Partial population is
+   * expected and is not an error.
+   */
+  app: SnapshotApp;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +540,18 @@ export interface SlateDebug {
 
 export interface RankResult {
   slate: Slate;
+  /**
+   * One snapshot per card in `slate.cards`, same order.
+   *
+   * Deliberately a SIBLING of `slate` rather than a field on `SlateCard`. The
+   * slate is the UI-facing type and a test greps its serialisation for numbers;
+   * telemetry hangs off the result instead, so a component that renders
+   * `slate.cards` cannot accidentally reach a score.
+   *
+   * Always populated, including when `debug` is off — instrumentation is not a
+   * debugging affordance, it is the deliverable.
+   */
+  snapshots: ScoreSnapshot[];
   debug?: SlateDebug;
 }
 
@@ -417,6 +560,19 @@ export interface RankOptions {
   deckSize?: number;
   /** Attach the numeric internals. Never enable this on a UI code path. */
   debug?: boolean;
+  /**
+   * DIAGNOSTICS ONLY. Replaces resolved parameters after the ship gate has run.
+   *
+   * This exists so an offline experiment can vary one weight across a sweep
+   * without editing `constants.ts`, running, and reverting — a dance that leaves
+   * no trace in the diff and is therefore indistinguishable from tuning. Every
+   * number in `DIAGNOSTICS.md` was produced through this field, so every
+   * diagnostic's configuration is visible in the script that ran it.
+   *
+   * A test asserts nothing under `adapter/` ever sets it. If you are reaching
+   * for it in application code, you want a constant.
+   */
+  paramsOverride?: Partial<ResolvedParams>;
 }
 
 export interface RankInput {
@@ -434,6 +590,33 @@ export interface RankInput {
    * simulator, which has no persistence.
    */
   regime?: number;
+  /**
+   * What this session has already put in front of the viewer (v1.7 §3.2).
+   *
+   * Discover shows one card at a time and the pool does not reset, so diversity
+   * has to be measured against the SESSION rather than against a deck. Omit it
+   * and every deck behaves as a fresh session — correct for a first fetch, and
+   * for the simulator, which drives one deck per day.
+   *
+   * `SessionShown` is declared in core/session.ts rather than here because it
+   * carries behaviour (the fold and the penalty function) and this file carries
+   * none.
+   */
+  sessionShown?: SessionShown;
+
+  /**
+   * Context only the parent app has, written verbatim onto every snapshot in
+   * this deck (v1.9 §2).
+   *
+   * Per-deck rather than per-card because that is how the values actually
+   * behave: `active_filters` and `entry_point` are properties of the fetch, not
+   * of the card. Pass what is known; everything omitted is written as `null`,
+   * which is a different and more useful thing than being absent.
+   *
+   * Import `SNAPSHOT_APP_KEYS` and build this object off it — a typo'd key is
+   * then a compile error rather than a column of nulls discovered in a month.
+   */
+  snapshotApp?: Partial<SnapshotApp>;
 }
 
 // ---------------------------------------------------------------------------
@@ -477,8 +660,176 @@ export interface RankingDataPort {
   listExplicitStatements(userId: UserId): Promise<InterestEvent[]>;
   deleteExplicitStatement(userId: UserId, metric: MetricSlug): Promise<void>;
 
-  /** Funnel instrumentation. */
-  logRankingEvent(event: RankingEventWrite): Promise<void>;
+  /**
+   * Funnel instrumentation. BATCHED, deliberately.
+   *
+   * There is no single-event method on the port. One network call per card is
+   * how instrumentation becomes the thing that gets deleted the first time
+   * someone profiles the Discover tab, and a one-card-at-a-time Discover makes
+   * that per-card cost land on every swipe.
+   *
+   * Implementations must not throw: the buffered writer above this treats a
+   * rejection as "retry, then drop", and a throw that escapes it would surface
+   * a logging failure to a user.
+   */
+  logRankingEvents(events: readonly RankingEventWrite[]): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Check-in data path (v1.7 §2.2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Completed pairings this user was part of. Reads `tandems`, whose `status`
+   * is the completion signal for the whole system — NOT `activities.status`,
+   * and NOT `tandem_completions` (2 rows against 23 completed tandems; see
+   * SCHEMA.md §1).
+   */
+  loadCompletedTandems(userId: UserId): Promise<TandemRecord[]>;
+
+  /** Feedback this user has already given, so nobody is asked twice. */
+  loadGivenFeedback(userId: UserId): Promise<GivenFeedback[]>;
+
+  /**
+   * Check-ins this user dismissed, so a dismissed prompt does not return
+   * (v1.9 §3). Reads `checkin_skips`.
+   *
+   * Degrades to `[]` on any failure, which re-asks rather than never asking.
+   * Of the two failure directions that is the recoverable one: an extra prompt
+   * is an annoyance, a check-in silently never asked is a permanently missing
+   * row in the highest-weighted signal in the model.
+   */
+  loadSkippedCheckIns(userId: UserId): Promise<CheckInSkip[]>;
+
+  /**
+   * Record one check-in answer. Writes `tandem_feedback` — which is already
+   * per-pair (`tandem_id`, `rater_id`, `rated_id`, `response`) and needed no
+   * migration at all.
+   *
+   * Must be idempotent: a double-tap or a retry-after-timeout must not produce
+   * two rows. Enforced by `tandem_feedback_one_per_rater_idx`.
+   */
+  writeCheckIn(answer: CheckInAnswer): Promise<void>;
+
+  /**
+   * Record that the rater dismissed this check-in (v1.9 §3, softened in v1.9.1
+   * §3).
+   *
+   * Writes `checkin_skips` and NOTHING else. In particular it must never write
+   * an `interest_events` row: a skip is not a negative answer, and the schema
+   * is shaped so that it cannot become one.
+   *
+   * `retryAfter` carries the escalation: a timestamp on the first skip, `null`
+   * on the second. The DECISION is made in `core/checkin.ts`
+   * (`nextSkipRetry`) — the port only persists what it is handed, so an adapter
+   * cannot quietly acquire its own retry policy.
+   *
+   * Must be idempotent on (tandemId, raterId): the table's primary key is that
+   * pair, so a repeat write updates rather than duplicating.
+   */
+  writeCheckInSkip(skip: {
+    tandemId: string;
+    raterId: UserId;
+    createdAt: Epoch;
+    retryAfter: Epoch | null;
+  }): Promise<void>;
+}
+
+/** One check-in answer, on its way to `tandem_feedback`. */
+export interface CheckInAnswer {
+  tandemId: string;
+  raterId: UserId;
+  ratedId: UserId;
+  /** Would you tandem with them again? */
+  positive: boolean;
+  createdAt: Epoch;
+}
+
+// ---------------------------------------------------------------------------
+// Check-in data path (v1.7 §2.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * One realised pairing. `tandems` is strictly PAIRWISE — this is the primitive,
+ * and a group tandem is a clique of these sharing `groupId`, not a row with
+ * three participants. See SCHEMA.md §3.
+ */
+export interface TandemRecord {
+  tandemId: string;
+  /** The two participants. Order is as stored; the check-in derives rater/rated. */
+  userAId: UserId;
+  userBId: UserId;
+  /** 'completed' is the completion signal for the whole system. */
+  status: string;
+  /**
+   * The post this pairing came from, when the link exists. [S1 in SCHEMA.md §5]
+   * Without it the check-in still writes feedback; only the interest mirror and
+   * the timing gate degrade.
+   */
+  activityId?: ActivityId;
+  /** Category of the linked activity, for the `interest_events` mirror. */
+  category?: CategorySlug;
+  /** When the activity ended. Falls back to a start-plus-duration estimate. */
+  endedAt?: Epoch;
+  createdAt: Epoch;
+}
+
+/** A check-in this user owes, resolved and ready to ask. */
+export interface PendingCheckIn {
+  tandemId: string;
+  /** The user being asked. */
+  raterId: UserId;
+  /** The counterpart being rated. Exactly one, because tandems are pairwise. */
+  ratedId: UserId;
+  activityId?: ActivityId;
+  category?: CategorySlug;
+  /** When the tandem ended — the ordering key. Oldest first. */
+  endedAt: Epoch;
+}
+
+/** A feedback row that already exists, so the same pairing is never asked twice. */
+export interface GivenFeedback {
+  tandemId: string;
+  ratedId: UserId;
+}
+
+/**
+ * A check-in the rater declined to answer (v1.9 §3).
+ *
+ * NOT a negative rating. There is deliberately no `ratedId` and no polarity on
+ * this type: a skip is a statement about the prompt, not about the person, and
+ * a shape that cannot express a judgement cannot later be mistaken for one.
+ */
+export interface CheckInSkip {
+  tandemId: string;
+  /**
+   * Who declined. Carried explicitly even though the adapter only ever loads
+   * one user's skips, so that `pendingCheckIns` can filter rather than TRUST
+   * that it was handed the right list.
+   *
+   * Without it, one person skipping suppresses the prompt for their
+   * counterpart — the two directions of a tandem share a `tandemId`. That is a
+   * silent, plausible-looking bug that costs the other person's answer, and the
+   * type is the cheapest place to make it impossible.
+   *
+   * Note this is `raterId`, never `ratedId`: it records who did not answer, not
+   * a judgement about anyone.
+   */
+  raterId: UserId;
+  /**
+   * When this check-in becomes askable again, or `null` for never (v1.9.1 §3).
+   *
+   * The skip is SOFT. One dismissal is ambiguous — a mis-tap, a bad moment —
+   * and labels are the scarcest resource in this system, so a first skip buys a
+   * delay rather than a deletion. A second skip on the same (tandem, rater)
+   * sets this to `null` and retires it.
+   *
+   * NOT optional and NOT `undefined`-able, deliberately. `null` here means
+   * "decided: never again". If the field could go missing, a row written before
+   * this existed would be indistinguishable from a deliberate retirement, and
+   * the reader would have to guess which. There are no such rows — the column
+   * and the table ship together — and the type keeps it that way.
+   */
+  retryAfter: Epoch | null;
 }
 
 /** What the adapter persists between sessions for the density estimate. */
@@ -507,7 +858,13 @@ export interface RankingEventWrite {
   eventType: RankingEventType;
   deckPosition?: number;
   source?: RetrievalSource;
-  /** Per-feature values at impression time. The labels for v2's regression. */
-  scoreSnapshot?: FeatureVector | null;
+  /**
+   * Client-generated, one per app foreground period. There is no server-side
+   * session concept and this build does not add one — a session is "the stretch
+   * of cards someone looked at in one sitting", which only the client can see.
+   */
+  sessionId?: SessionId;
+  /** Every feature and funnel factor at impression time. See ScoreSnapshot. */
+  scoreSnapshot?: ScoreSnapshot | null;
   createdAt: Epoch;
 }

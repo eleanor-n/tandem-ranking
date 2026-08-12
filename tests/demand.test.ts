@@ -24,6 +24,20 @@ const village = resolveParams(0);
 const city = resolveParams(1);
 const viewer = makeViewer();
 
+/**
+ * v1.7: exhaustion SHIPS OFF (CONSTANTS.collapsed.exhaustionRate is 0), because
+ * `repeatAffinity` has no data and the term therefore damps good repeats and
+ * bad ones identically — against the very metric it exists to serve.
+ *
+ * The mechanism is not deleted, so it is still tested here at the rates it will
+ * be reactivated with. That is the difference between shelving something and
+ * abandoning it: these tests keep running, so the day check-ins ship the code
+ * still works.
+ */
+const reactivatedRate = CONSTANTS.collapsed.exhaustionRateWhenReactivated;
+const villageX = { ...village, exhaustionRate: reactivatedRate };
+const cityX = { ...city, exhaustionRate: reactivatedRate * 0.5 };
+
 const post = (over: Parameters<typeof makeCandidate>[0]) => makeCandidate(over);
 
 describe('fillRatio', () => {
@@ -102,21 +116,21 @@ describe('overflow', () => {
 
 describe('exhaustion', () => {
   it('is zero for a host you have never met', () => {
-    expect(exhaustion(post({ activityId: 'a' }), village)).toBe(0);
-    expect(exhaustion(post({ activityId: 'a', completedTogether: 0 }), village)).toBe(0);
+    expect(exhaustion(post({ activityId: 'a' }), villageX)).toBe(0);
+    expect(exhaustion(post({ activityId: 'a', completedTogether: 0 }), villageX)).toBe(0);
   });
 
   it('saturates rather than growing linearly', () => {
-    const p = (n: number) => exhaustion(post({ activityId: 'a', completedTogether: n }), village);
+    const p = (n: number) => exhaustion(post({ activityId: 'a', completedTogether: n }), villageX);
     const first = p(1) - p(0);
     const tenth = p(10) - p(9);
     expect(tenth).toBeLessThan(first);
     expect(p(100)).toBeLessThan(1);
   });
 
-  it('bites harder at village scale, where new faces are scarce', () => {
+  it('is monotone in the rate', () => {
     const c = post({ activityId: 'a', completedTogether: 3 });
-    expect(exhaustion(c, village)).toBeGreaterThan(exhaustion(c, city));
+    expect(exhaustion(c, villageX)).toBeGreaterThan(exhaustion(c, cityX));
   });
 });
 
@@ -125,16 +139,16 @@ describe('repeatAffinity gating', () => {
     // The load-bearing case. Becoming a habit with someone is the north star,
     // so exhaustion must not punish the pairings that are working.
     const loved = post({ activityId: 'a', completedTogether: 5, repeatAffinity: 1 });
-    const adjustment = demandAdjustment(viewer, loved, T0, village);
+    const adjustment = demandAdjustment(viewer, loved, T0, villageX);
     expect(adjustment.exhaustion).toBeGreaterThan(0.5);   // they ARE exhausted
     expect(adjustment.multiplier).toBe(1);                 // and it costs nothing
   });
 
   it('suppresses hardest for a host you said no to', () => {
     const base = { activityId: 'a', completedTogether: 3 } as const;
-    const said_no = demandAdjustment(viewer, post({ ...base, repeatAffinity: 0 }), T0, village);
-    const unknown = demandAdjustment(viewer, post({ ...base }), T0, village);
-    const said_yes = demandAdjustment(viewer, post({ ...base, repeatAffinity: 1 }), T0, village);
+    const said_no = demandAdjustment(viewer, post({ ...base, repeatAffinity: 0 }), T0, villageX);
+    const unknown = demandAdjustment(viewer, post({ ...base }), T0, villageX);
+    const said_yes = demandAdjustment(viewer, post({ ...base, repeatAffinity: 1 }), T0, villageX);
 
     expect(said_no.multiplier).toBeLessThan(unknown.multiplier);
     expect(unknown.multiplier).toBeLessThan(said_yes.multiplier);
@@ -150,13 +164,44 @@ describe('repeatAffinity gating', () => {
   });
 });
 
+describe('exhaustion ships disabled (v1.7 §3.1)', () => {
+  it('is zero at every point on the continuum', () => {
+    // Not "small". Zero. `repeatAffinity` has no data, so the term cannot tell
+    // a good repeat from a bad one and damps both by the same amount — and
+    // repeat-tandem rate is the long-run north star. A uniform damper on the
+    // thing you are optimising for is worse than no damper at all.
+    for (let r = 0; r <= 1.0001; r += 0.05) {
+      expect(resolveParams(r).exhaustionRate).toBe(0);
+    }
+  });
+
+  it('makes a fifty-time repeat cost exactly nothing today', () => {
+    const worn = post({ activityId: 'a', completedTogether: 50, repeatAffinity: 0 });
+    const adjustment = demandAdjustment(viewer, worn, T0, village);
+    expect(adjustment.exhaustion).toBe(0);
+    expect(adjustment.multiplier).toBe(1);
+  });
+
+  it('keeps the tuned rate parked for reactivation', () => {
+    // Shelved, not abandoned. The reactivation condition is stated in exactly
+    // one place (constants.ts) and the number is not lost with it.
+    expect(reactivatedRate).toBeGreaterThan(0);
+  });
+});
+
 describe('the combined adjustment', () => {
-  it('boosts an empty imminent post far more at village than at city scale', () => {
+  it('boosts an empty imminent post, in proportion to demandWeight', () => {
+    // v1.7 asserted village > city here. v1.8 §2 collapsed demandWeight to a
+    // single constant, so the comparison that remains is against the parameter
+    // rather than against a density that no longer varies.
     const desperate = post({ activityId: 'a', confirmedJoiners: 0, startsAt: T0 + DAY });
-    const v = demandAdjustment(viewer, desperate, T0, village).multiplier;
-    const c = demandAdjustment(viewer, desperate, T0, city).multiplier;
-    expect(v).toBeGreaterThan(c);
-    expect(v).toBeGreaterThan(1.3);
+    const shipped = demandAdjustment(viewer, desperate, T0, village).multiplier;
+    const stronger = demandAdjustment(
+      viewer, desperate, T0, { ...village, demandWeight: village.demandWeight * 5 },
+    ).multiplier;
+
+    expect(shipped).toBeGreaterThan(1);
+    expect(stronger).toBeGreaterThan(shipped);
   });
 
   it('is inert when every term is absent', () => {
@@ -177,7 +222,7 @@ describe('the combined adjustment', () => {
       repeatAffinity: 0,
       startsAt: T0 + 365 * DAY,
     });
-    const m = demandAdjustment(viewer, worst, T0, village).multiplier;
+    const m = demandAdjustment(viewer, worst, T0, villageX).multiplier;
     expect(m).toBeGreaterThan(0);
     expect(m).toBeGreaterThanOrEqual(CONSTANTS.demand.multiplierFloor);
   });
@@ -185,7 +230,7 @@ describe('the combined adjustment', () => {
   it('reports its components for debugging', () => {
     const a = demandAdjustment(viewer, post({
       activityId: 'a', confirmedJoiners: 0, completedTogether: 2, startsAt: T0 + DAY,
-    }), T0, village);
+    }), T0, villageX);
     expect(a.urgency).toBeGreaterThan(0);
     expect(a.overflow).toBe(0);
     expect(a.exhaustion).toBeGreaterThan(0);

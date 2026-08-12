@@ -1,6 +1,6 @@
 {
   "name": "tandem-ranking",
-  "version": "1.5.0",
+  "version": "1.7.0",
   "private": false,
   "description": "Ranking and interest-modelling layer for Tandem. Framework-agnostic core, pluggable data port, Supabase reference adapter.",
   "license": "MIT",
@@ -12,7 +12,9 @@
     "test:watch": "vitest",
     "sim": "tsx scripts/simulate.ts",
     "backfill": "tsx scripts/backfill-interest-events.ts",
-    "sweep": "tsx scripts/sweep.ts"
+    "sweep": "tsx scripts/sweep.ts",
+    "graph:rebuild": "tsx scripts/rebuild-graph-edges.ts",
+    "podium": "tsx scripts/podium.ts"
   },
   "dependencies": {},
   "devDependencies": {

@@ -36,7 +36,17 @@ describe('core is framework-agnostic', () => {
   it('imports nothing outside core/', () => {
     for (const file of coreFiles()) {
       const source = readFileSync(file, 'utf8');
-      const imports = [...source.matchAll(/from\s+'([^']+)'/g)].map((m) => m[1] as string);
+      // Anchored to `import` at the start of a line, NOT a bare `from '...'`.
+      //
+      // The loose version matched prose inside ordinary string literals — a
+      // validator message reading `cannot tell "unavailable" from "predates the
+      // field"` parsed as an import of `" + "`. `code()` cannot be used here
+      // either, since blanking string literals also blanks the import specifier
+      // this test exists to read.
+      const imports = [...source.matchAll(/^import\b[\s\S]*?\bfrom\s+'([^']+)'/gm)]
+        .map((m) => m[1] as string);
+      expect(imports.length, `${file}: no imports parsed — check the regex`)
+        .toBeGreaterThanOrEqual(0);
       for (const spec of imports) {
         expect(
           spec.startsWith('./'),
@@ -144,17 +154,98 @@ describe('the regime boundary', () => {
     expect(callers).toEqual(['rank.ts']);
   });
 
-  it('scale-dependent constants are declared only as scaled pairs', () => {
-    // A fixed value for something the spec says must scale is a regression that
-    // typechecks perfectly.
+  it('the collapsed parameters are declared as single constants (v1.8 §2)', () => {
+    // THIS RULE INVERTED IN v1.8. Through v1.7 it asserted the opposite: that
+    // each of these was a { village, city } pair, because a fixed value for
+    // something the spec said must scale is a regression that typechecks
+    // perfectly.
+    //
+    // §2 collapsed the pairs — twelve were declared, one was ever swept, and
+    // that sweep found the primary metric flat in it. So the regression to
+    // guard against is now the reverse: a pair reintroduced without the
+    // measurement that would justify it.
+    //
+    // REACTIVATION CONDITION: a swept pair that beats its collapsed constant at
+    // 6+ seeds and 2 standard errors. When one earns it, move that name out of
+    // this list rather than deleting the check.
     const source = readFileSync(join(CORE_DIR, 'constants.ts'), 'utf8');
     for (const name of [
-      'exploreEpsilon', 'maxPerCategory', 'maxPerHost',
-      'demandWeight', 'overflowPenalty', 'exhaustionRate',
+      'exploreEpsilon', 'categoryPenalty', 'hostPenalty',
+      'demandWeight', 'overflowPenalty', 'exhaustionRate', 'noveltyBoost',
     ]) {
-      const bare = new RegExp(`^\\s*${name}:\\s*[\\d.]`, 'm');
-      expect(bare.test(source), `${name} has a fixed value; it must be a {village, city} pair`)
-        .toBe(false);
+      const paired = new RegExp(`^\\s*${name}:\\s*\\{\\s*village`, 'm');
+      expect(
+        paired.test(source),
+        `${name} is declared as a {village, city} pair. v1.8 §2 collapsed these; ` +
+        'reintroducing one needs a sweep beating the constant at 6+ seeds and 2 SE.',
+      ).toBe(false);
+    }
+  });
+});
+
+describe('the deprecated impression table stays deprecated', () => {
+  // v1.7 §1.3. Two tables with overlapping jobs is how a training set ends up
+  // split across schemas with no way to join it afterwards. ranking_events won
+  // (it has host_id, and it has data); feed_impressions has a DEPRECATED table
+  // comment, and this is the half of that decision that cannot be ignored.
+  it('nothing in src/ or scripts/ references feed_impressions', () => {
+    const roots = [
+      join(import.meta.dirname, '..', 'src', 'ranking', 'core'),
+      join(import.meta.dirname, '..', 'src', 'ranking', 'adapter'),
+      join(import.meta.dirname, '..', 'scripts'),
+    ];
+    for (const dir of roots) {
+      for (const f of readdirSync(dir).filter((x) => x.endsWith('.ts'))) {
+        // code() strips comments and string literals, so explaining WHY the
+        // table is deprecated is fine; naming it in a query is not.
+        const source = code(readFileSync(join(dir, f), 'utf8'));
+        expect(
+          /feed_impressions/.test(source),
+          `${f} references feed_impressions — it is deprecated; write ranking_events`,
+        ).toBe(false);
+      }
+    }
+  });
+});
+
+describe('the ship gate', () => {
+  // v1.7 §3.3. One flag, read in one place. The gate is a parameter
+  // transformation rather than a branch (see core/shipping.ts), which is what
+  // stops the shelved ranker rotting into code that no longer works when the
+  // flag flips.
+  it('only rank.ts reads the ranker flag', () => {
+    const readers = readdirSync(CORE_DIR)
+      .filter((f) => f.endsWith('.ts') && f !== 'shipping.ts')
+      .filter((f) => /RANKER_ENABLED|applyShipGate/.test(
+        code(readFileSync(join(CORE_DIR, f), 'utf8')),
+      ));
+    expect(readers).toEqual(['rank.ts']);
+  });
+
+  it('no scoring module imports the shipping module', () => {
+    // Same rule as the regime boundary, for the same reason: a scoring module
+    // that can see the flag will eventually branch on it.
+    const sealed = ['score.ts', 'slate.ts', 'explain.ts', 'retrieval.ts', 'features.ts', 'demand.ts'];
+    for (const file of sealed) {
+      const source = readFileSync(join(CORE_DIR, file), 'utf8');
+      expect(
+        /from\s+'\.\/shipping\.js'/.test(source),
+        `${file} imports ./shipping.js — it must take ResolvedParams instead`,
+      ).toBe(false);
+    }
+  });
+
+  it('the diagnostics parameter override is never used by application code', () => {
+    // paramsOverride exists so an offline sweep can vary one weight without the
+    // edit-run-revert dance, which leaves no trace in a diff and is therefore
+    // indistinguishable from tuning. In app code it would be a constant.
+    const adapterDir = join(import.meta.dirname, '..', 'src', 'ranking', 'adapter');
+    for (const f of readdirSync(adapterDir).filter((x) => x.endsWith('.ts'))) {
+      const source = code(readFileSync(join(adapterDir, f), 'utf8'));
+      expect(
+        /paramsOverride\s*:/.test(source),
+        `${f} sets paramsOverride — that field is for diagnostics only`,
+      ).toBe(false);
     }
   });
 });

@@ -174,79 +174,86 @@ export function computeRegime(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve every scaled parameter at once, for one session.
+ * Resolve the parameters for one session.
  *
- * P_join weights are renormalised AFTER interpolation. The declared columns do
- * not each sum to 1 (village sums to 0.85), which is deliberate — it keeps the
- * table readable as the relative importances the spec stated rather than as
- * pre-divided fractions. Renormalising here means the invariant holds at every
- * point on the continuum, not just at the two ends.
+ * AS OF v1.8 §2 THIS IS AN IDENTITY. Every parameter it returns is a single
+ * constant; `regime` is accepted, validated and ignored.
  *
- * maxPerCategory and maxPerHost are rounded: they are counts, and a cap of 2.4
- * cards is not a thing. Rounding rather than flooring so the midpoint of
- * {8, 2} lands at 5 rather than collapsing early toward the city value.
+ * The signature is unchanged on purpose. Reactivating density adaptation means
+ * turning one of `CONSTANTS.collapsed.*` back into a `{ village, city }` pair
+ * and putting `resolve(pair, t)` back on that line — one edit per parameter,
+ * with every caller, every test and the whole interpolation machinery still in
+ * place. See `CONSTANTS.collapsed` for why the pairs were collapsed and what
+ * would justify bringing one back.
+ *
+ * P_join weights are still renormalised, which keeps the declared table
+ * readable as relative importances rather than as pre-divided fractions.
  */
 export function resolveParams(regime: number): ResolvedParams {
-  const t = clamp01(regime);
-  const s = CONSTANTS.scaled;
+  // Clamped for the contract rather than for the arithmetic: callers still pass
+  // a regime, `getRegimeDebug` still reports one, and a NaN leaking through
+  // here would be a silent contract violation even while nothing reads it.
+  clamp01(regime);
 
-  const rawJoin = {
-    interestAffinity: resolve(s.pJoin.interestAffinity, t),
-    proximity: resolve(s.pJoin.proximity, t),
-    timeFit: resolve(s.pJoin.timeFit, t),
-    intentMatch: resolve(s.pJoin.intentMatch, t),
-    socialContext: resolve(s.pJoin.socialContext, t),
-    graphAffinity: resolve(s.pJoin.graphAffinity, t),
-  };
+  const c = CONSTANTS.collapsed;
 
   const joinSum =
-    rawJoin.interestAffinity + rawJoin.proximity + rawJoin.timeFit +
-    rawJoin.intentMatch + rawJoin.socialContext + rawJoin.graphAffinity;
+    c.pJoin.interestAffinity + c.pJoin.proximity + c.pJoin.timeFit +
+    c.pJoin.intentMatch + c.pJoin.socialContext + c.pJoin.graphAffinity;
 
   // Guaranteed non-zero by the load-time assertion in constants.ts, but a
   // division that can silently produce NaN in a ranking path is worth a guard.
   if (!(joinSum > 0)) {
-    throw new Error(`resolveParams: P_join weights sum to ${joinSum} at regime ${t}`);
+    throw new Error(`resolveParams: P_join weights sum to ${joinSum}`);
   }
 
   const pJoin = {
-    interestAffinity: rawJoin.interestAffinity / joinSum,
-    proximity: rawJoin.proximity / joinSum,
-    timeFit: rawJoin.timeFit / joinSum,
-    intentMatch: rawJoin.intentMatch / joinSum,
-    socialContext: rawJoin.socialContext / joinSum,
-    graphAffinity: rawJoin.graphAffinity / joinSum,
+    interestAffinity: c.pJoin.interestAffinity / joinSum,
+    proximity: c.pJoin.proximity / joinSum,
+    timeFit: c.pJoin.timeFit / joinSum,
+    intentMatch: c.pJoin.intentMatch / joinSum,
+    socialContext: c.pJoin.socialContext / joinSum,
+    graphAffinity: c.pJoin.graphAffinity / joinSum,
   };
 
   const quotas: Record<RetrievalSource, number> = {
-    affinity: resolve(s.quotas.affinity, t),
-    proximity: resolve(s.quotas.proximity, t),
-    fresh_host: resolve(s.quotas.fresh_host, t),
-    random: resolve(s.quotas.random, t),
-    graph: resolve(s.quotas.graph, t),
+    affinity: c.quotas.affinity,
+    proximity: c.quotas.proximity,
+    fresh_host: c.quotas.fresh_host,
+    random: c.quotas.random,
+    graph: c.quotas.graph,
   };
 
   return {
     pJoin,
     quotas,
-    exploreEpsilon: resolve(s.exploreEpsilon, t),
-    maxPerCategory: Math.round(resolve(s.maxPerCategory, t)),
-    maxPerHost: Math.round(resolve(s.maxPerHost, t)),
-    demandWeight: resolve(s.demandWeight, t),
-    overflowPenalty: resolve(s.overflowPenalty, t),
-    exhaustionRate: resolve(s.exhaustionRate, t),
-    noveltyBoost: resolve(s.noveltyBoost, t),
+    exploreEpsilon: c.exploreEpsilon,
+    categoryPenalty: c.categoryPenalty,
+    hostPenalty: c.hostPenalty,
+    demandWeight: c.demandWeight,
+    overflowPenalty: c.overflowPenalty,
+    exhaustionRate: c.exhaustionRate,
+    noveltyBoost: c.noveltyBoost,
+    funnelExponent: CONSTANTS.shipping.funnelExponent,
+    completionFloor: CONSTANTS.score.completionFloor,
+    repeatableContextWeight: CONSTANTS.score.rRepeat.repeatableContext,
+    repeatableContextDamping: CONSTANTS.score.repeatableContextDamping,
+    hostAcceptDamping: CONSTANTS.features.acceptance.hostAcceptDamping,
   };
 }
 
 /**
  * A stable fingerprint of the resolved parameters.
  *
- * The interest vector depends on `noveltyBoost`, which now moves with density —
- * so a cached interest state computed under one regime is wrong under another.
- * This goes into the cache freshness check. Without it, a user crossing the
- * hysteresis band would keep serving an interest vector computed with the old
- * novelty weighting until an unrelated event invalidated it.
+ * The interest vector depends on `noveltyBoost`. That parameter moved with
+ * density through v1.7, so a vector computed under one regime was WRONG under
+ * another rather than merely stale — hence this fingerprint (INFERENCES §F6).
+ *
+ * v1.8 §2 collapsed the pairs, so `noveltyBoost` is now constant and the
+ * fingerprint is constant with it. The mechanism is retained rather than
+ * removed: it costs one string per cache write, and it is exactly what would be
+ * needed again the day a swept pair earns reactivation. A cache-invalidation
+ * bug found six months after the fact is not worth the deletion.
  */
 export function paramsFingerprint(params: ResolvedParams): string {
   return `nb:${params.noveltyBoost.toFixed(4)}`;

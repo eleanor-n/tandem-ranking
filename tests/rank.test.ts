@@ -5,6 +5,9 @@
 
 import { describe, expect, it } from 'vitest';
 import { rank } from '../src/ranking/core/rank.js';
+import { resolveParams } from '../src/ranking/core/regime.js';
+import { RANKER_ENABLED } from '../src/ranking/core/shipping.js';
+import { EMPTY_SESSION, noteShown } from '../src/ranking/core/session.js';
 import { CONSTANTS } from '../src/ranking/core/constants.js';
 import {
   DAY,
@@ -34,6 +37,22 @@ const history: InterestEvent[] = [
  */
 const CITY = { regime: 1 } as const;
 const VILLAGE = { regime: 0 } as const;
+
+/**
+ * v1.7: the ranker is SHELVED, not deleted.
+ *
+ * `RANKER_ENABLED` is false, so by default `rank()` orders by proximity, demand
+ * and the session penalties — no affinity retrieval, no explore swap, no
+ * reserved fresh-host slot, no funnel factors. Tests that exercise the shelved
+ * machinery have to wake it up, and they do it the same way the diagnostics do:
+ * by handing back the ungated parameters.
+ *
+ * This is the point of the parameter-override design. The shelved code is not a
+ * second path that rots — it is the live path with different numbers, and these
+ * tests keep running against it every commit. The day the flag flips, the
+ * ranker works, because it never stopped being tested.
+ */
+const rankerOn = (regime: number) => ({ paramsOverride: resolveParams(regime) });
 
 describe('determinism', () => {
   it('same seed, same deck, ten runs — byte-identical', () => {
@@ -66,7 +85,8 @@ describe('determinism', () => {
     const decks = new Set<string>();
     for (let i = 0; i < 40; i++) {
       decks.add(JSON.stringify(
-        rank({ ...base, sessionId: `sess-${i}` }).slate.cards.map((c) => c.activityId),
+        rank({ ...base, sessionId: `sess-${i}` }, rankerOn(1))
+          .slate.cards.map((c) => c.activityId),
       ));
     }
     expect(decks.size).toBeGreaterThan(1);
@@ -115,23 +135,70 @@ describe('the score orders, never filters', () => {
 });
 
 describe('slate constraints', () => {
-  it('no more than 2 same-category cards in a deck of 8, at city scale', () => {
-    const result = rank({
+  it('penalises repeats within a deck rather than capping them', () => {
+    // v1.7 §3.2. The v1.6 test asserted "no more than 2 of a category per 8".
+    // That constraint was mis-specified, not mistuned: Discover shows one card
+    // at a time and never resets the pool, so a cap expressed per-deck applies
+    // to a window that does not exist.
+    //
+    // What replaces it is monotone rather than binary — the fourth coffee is
+    // worse than the third, not forbidden where the third was free.
+    const monoculture = Array.from({ length: 12 }, (_, i) =>
+      makeCandidate({
+        activityId: `m${String(i).padStart(2, '0')}`,
+        category: i % 2 === 0 ? 'coffee' : 'hiking',
+        hostId: `host_${i}`,
+        distanceMiles: 1 + i * 0.05,
+        host: makeHost({ hostId: `host_${i}` }),
+      }),
+    );
+
+    const result = rank(
+      {
+        viewer: makeViewer(),
+        candidates: monoculture,
+        interestEvents: history,
+        sessionId: 'sess-1',
+        now: T0,
+        ...CITY,
+      },
+      { debug: true, ...rankerOn(1) },
+    );
+
+    // Both categories appear: the penalty pulls the deck off a pure run of the
+    // strongest one without forbidding anything.
+    const categories = new Set(result.slate.cards.map((c) => c.category));
+    expect(categories.size).toBe(2);
+    expect(result.slate.cards.length).toBe(CONSTANTS.slate.deckSize);
+  });
+
+  it('carries the penalty ACROSS decks within one session', () => {
+    // The property the caps could not have. Two fetches in one session are one
+    // continuous stream of cards from the user's side; they do not know where
+    // one ended and the next began.
+    const pool = standardPool();
+    const base = {
       viewer: makeViewer(),
-      candidates: standardPool(),
+      candidates: pool,
       interestEvents: history,
       sessionId: 'sess-1',
       now: T0,
       ...CITY,
-    });
+    };
 
-    const counts = new Map<string, number>();
-    for (const card of result.slate.cards) {
-      counts.set(card.category, (counts.get(card.category) ?? 0) + 1);
-    }
-    for (const [, n] of counts) {
-      expect(n).toBeLessThanOrEqual(CONSTANTS.scaled.maxPerCategory.city);
-    }
+    const first = rank(base, { deckSize: 3 });
+    const firstHost = first.slate.cards[0]!.hostId;
+
+    // Tell the ranker that host has now been shown four times this session.
+    const shown = noteShown(
+      EMPTY_SESSION,
+      Array.from({ length: 4 }, () => ({ category: 'irrelevant', hostId: firstHost })),
+    );
+    const second = rank({ ...base, sessionShown: shown }, { deckSize: 3 });
+
+    // 0.6^4 is a ~87% discount at city scale. Whatever was on top before is not
+    // on top now.
+    expect(second.slate.cards[0]!.hostId).not.toBe(firstHost);
   });
 
   it('at least one fresh_host card appears in the top 3, at city scale', () => {
@@ -144,7 +211,7 @@ describe('slate constraints', () => {
         now: T0,
         ...CITY,
       },
-      { debug: true },
+      { debug: true, ...rankerOn(1) },
     );
 
     const fresh = new Set(['host_f', 'host_g']);
@@ -153,9 +220,15 @@ describe('slate constraints', () => {
     expect(result.debug!.relaxations).not.toContain('minFreshHostInTop');
   });
 
-  it('relaxes constraints rather than shipping a short deck', () => {
-    // Nine cards, all the same category, all the same host. Every diversity cap
-    // is unsatisfiable; the deck must still come out full.
+  it('ships a full deck from a monoculture with NOTHING to relax', () => {
+    // Nine cards, all the same category, all the same host — the pool that
+    // forced v1.6's relaxation ladder to give up both caps.
+    //
+    // v1.7 has no ladder because it has nothing to relax. A hard cap could make
+    // the deck come out short, which is why the ladder existed; a penalised
+    // card is still a card, so the failure mode stopped existing rather than
+    // being handled. The deck is full and no cap relaxation is recorded,
+    // because there are no caps.
     const monoculture = Array.from({ length: 9 }, (_, i) =>
       makeCandidate({
         activityId: `m${String(i).padStart(2, '0')}`,
@@ -175,12 +248,16 @@ describe('slate constraints', () => {
         now: T0,
         ...CITY,
       },
-      { debug: true },
+      { debug: true, ...rankerOn(1) },
     );
 
     expect(result.slate.cards.length).toBe(CONSTANTS.slate.deckSize);
-    expect(result.debug!.relaxations).toContain('maxPerCategory');
-    expect(result.debug!.relaxations).toContain('minFreshHostInTop');
+    expect(result.debug!.relaxations).not.toContain('maxPerCategory');
+    expect(result.debug!.relaxations).not.toContain('maxPerHost');
+    // The fresh-host guarantee is the only displacement rule left, and this
+    // pool genuinely contains no fresh host — that is supply information, not a
+    // failure.
+    expect(result.debug!.relaxations).toEqual(['minFreshHostInTop']);
   });
 });
 
@@ -318,8 +395,19 @@ describe('time is injected', () => {
   });
 });
 
-describe('village scale (v1.6 §2.3)', () => {
-  it('spends no slots on explore or fresh-host quotas', () => {
+describe('the §2.3 claim, now reachable only by configuring it (v1.8 §2)', () => {
+  // v1.6 §2.3 claimed that at village scale the fairness rules stop being
+  // DISPLACEMENT rules and become ORDERING rules: nothing needs a reserved slot
+  // when the whole pool gets shown anyway, because urgency surfaces an unfilled
+  // new host's post on its own.
+  //
+  // v1.8 §2 collapsed the density pairs, so "village scale" is no longer a
+  // configuration the system can be in. The claim is not refuted — it was never
+  // tested against data — it is simply no longer reachable by setting `regime`.
+  // These tests now configure the parameters directly, which keeps the claim
+  // exercised and makes explicit what used to be implied by a scalar.
+
+  it('spends no slots on explore or fresh-host quotas when they are zero', () => {
     const result = rank(
       {
         viewer: makeViewer(),
@@ -329,7 +417,13 @@ describe('village scale (v1.6 §2.3)', () => {
         now: T0,
         ...VILLAGE,
       },
-      { debug: true },
+      {
+        debug: true,
+        paramsOverride: {
+          exploreEpsilon: 0,
+          quotas: { affinity: 0.7, proximity: 0.3, fresh_host: 0, random: 0, graph: 0 },
+        },
+      },
     );
 
     expect(result.debug!.params.exploreEpsilon).toBe(0);
@@ -338,10 +432,10 @@ describe('village scale (v1.6 §2.3)', () => {
   });
 
   it("a new host's first post reaches the top 3 with NO fresh-host slot", () => {
-    // The §2.3 claim: at village scale the fairness rules stop being
-    // displacement rules and become ordering rules. Nothing is displaced when
-    // the whole pool gets shown anyway — a brand-new host's post has
-    // fillRatio 0, so urgency surfaces it without a reserved slot.
+    // The §2.3 claim itself, with the parameters it needs supplied explicitly
+    // rather than arriving via a regime scalar: a strong demand weight and no
+    // reserved fresh-host slot. A brand-new host's post has fillRatio 0, so
+    // urgency surfaces it without anything being displaced.
     const pool = standardPool().map((c) =>
       c.hostId === 'host_g'
         // Brand-new host, nobody signed up, happening in two days, and
@@ -361,7 +455,16 @@ describe('village scale (v1.6 §2.3)', () => {
         now: T0,
         ...VILLAGE,
       },
-      { debug: true },
+      {
+        debug: true,
+        paramsOverride: {
+          ...resolveParams(0),
+          demandWeight: 0.5,
+          overflowPenalty: 0.6,
+          exploreEpsilon: 0,
+          quotas: { affinity: 0.3, proximity: 0.7, fresh_host: 0, random: 0, graph: 0 },
+        },
+      },
     );
 
     const top3 = result.slate.cards.slice(0, 3).map((c) => c.hostId);
@@ -371,7 +474,7 @@ describe('village scale (v1.6 §2.3)', () => {
     expect(result.debug!.retrieval.fresh_host).toEqual([]);
   });
 
-  it('does not cap categories when the pool has no diversity to spend', () => {
+  it('barely penalises repeats when the pool has no diversity to spend', () => {
     const result = rank(
       {
         viewer: makeViewer(),
@@ -383,7 +486,11 @@ describe('village scale (v1.6 §2.3)', () => {
       },
       { debug: true },
     );
-    expect(result.debug!.params.maxPerCategory).toBe(8);
+    // Near 1 at village: penalising the second coffee when coffee is most of
+    // what exists demotes the whole pool uniformly, which is a no-op with extra
+    // steps.
+    expect(result.debug!.params.categoryPenalty)
+      .toBe(CONSTANTS.collapsed.categoryPenalty);
     // No relaxation is recorded, because nothing was constrained in the first
     // place. Relaxations should mean "we wanted to and could not", not "n/a".
     expect(result.debug!.relaxations).toEqual([]);
@@ -428,6 +535,7 @@ describe('regime is derived when not supplied', () => {
       { debug: true },
     );
     expect(result.debug!.regime).toBe(1);
-    expect(result.debug!.params.maxPerCategory).toBe(2);
+    expect(result.debug!.params.categoryPenalty)
+      .toBe(CONSTANTS.collapsed.categoryPenalty);
   });
 });
